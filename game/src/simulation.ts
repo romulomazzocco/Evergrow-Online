@@ -372,18 +372,20 @@ export class Simulation {
 
   /** One server-owned world tick. Each member retains its own action buffers,
    * missiles, cooldowns and rewards; enemies and ground loot advance only once. */
+  copyCooperativeWorldTo(sim: Simulation): void {
+    sim.world=this.world;sim.enemies=this.enemies;sim.groundItems=this.groundItems;sim.groundGold=this.groundGold;sim.pickups=this.pickups;
+    sim.nextId=this.nextId;sim.time=this.time;sim.damageOwners=this.damageOwners;sim.camps=this.camps;
+    sim.eventState=this.eventState;sim.expeditions=this.expeditions;sim.dungeonFloor=this.dungeonFloor;
+    sim.brokenContainers.clear();for(const id of this.brokenContainers)sim.brokenContainers.add(id);
+  }
   updateCooperative(members: readonly { sim: Simulation; input: Input }[]): void {
     const dt = FIXED_STEP;
     this.capturePositions();
     this.time += dt;
     for (const enemy of this.enemies) enemy.hitFlash = Math.max(0, enemy.hitFlash - dt);
     const share = (sim: Simulation) => {
-      sim.enemies = this.enemies; sim.groundItems = this.groundItems;
-      sim.groundGold = this.groundGold; sim.pickups = this.pickups;
-      sim.nextId = this.nextId; sim.time = this.time;
-      sim.damageOwners = this.damageOwners;
+      this.copyCooperativeWorldTo(sim);
       sim.rewardPartners = members.map(member => member.sim);
-      for (const id of this.brokenContainers) sim.brokenContainers.add(id);
     };
     const commit = (sim: Simulation) => {
       this.nextId = sim.nextId; this.enemies = sim.enemies;
@@ -400,6 +402,11 @@ export class Simulation {
         sim.queueInput(input);
         sim.updatePlayer(dt, sim.groundPickup.input(p, sim.groundItems, sim.world, sim.time, dt, input));
         metric(p.chronicle, 'time', dt);
+        sim.eventChannel.advance(dt,p,input);
+        if(p.character.blessing&&!sim.world.isSanctuary?.(p.x,p.y)){
+          p.character.blessing.remaining=Math.max(0,p.character.blessing.remaining-dt);
+          if(!p.character.blessing.remaining){delete p.character.blessing;refreshCharacter(p);}
+        }
       }
       sim.updateProjectiles(dt);
       advanceChains(sim.chains, dt, {
@@ -436,6 +443,15 @@ export class Simulation {
     for (const sim of party) if (!sim.player.dead) {
       share(sim); sim.camps = this.camps;
       sim.updateSpawns(dt); commit(sim);
+    }
+    syncTrial(this.eventState,this.enemies);
+    this.eventTimer-=dt;
+    if(!this.dungeonFloor&&this.eventTimer<=0&&living.length){
+      this.eventTimer=.5;
+      const trial=this.eventState.trial,site=trial?this.eventState.sites[trial.siteId]:undefined;
+      const anchor=site?living.reduce((a,b)=>Math.hypot(a.player.x-site.x,a.player.y-site.y)<Math.hypot(b.player.x-site.x,b.player.y-site.y)?a:b):living[0];
+      advanceTrial({state:this.eventState,player:anchor.player,enemies:this.enemies,world:this.world,view:anchor.spawnExclusion,
+        spawn:(kind,x,y,rank,source)=>this.spawnEnemy(kind,x,y,rank,source)});
     }
     this.world.setBrokenContainers?.(this.brokenContainers);
     this.enemies = this.enemies.filter(e => e.state !== 'dead' || e.stateTime < ENCOUNTER_RULES.corpseDuration);

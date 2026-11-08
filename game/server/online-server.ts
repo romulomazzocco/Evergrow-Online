@@ -39,7 +39,7 @@ export async function createOnlineServer(options: Options = {}) {
       const saved = JSON.parse(source) as SavedRoom[];
       if (!Array.isArray(saved) || saved.length > ONLINE_LIMITS.rooms || saved.some(room => room.version !== 1 || !isWorldSeed(room.seed)))
         throw new Error('Unsupported online save. Preserve rooms.json before changing server versions.');
-      for (const entry of saved) { const room = OnlineRoom.restore(entry); rooms.set(room.id, room); }
+      for (const entry of saved) { const room = OnlineRoom.restore(entry);room.persist=persist; rooms.set(room.id, room); }
     }
   }
   function limit(key: string, maximum: number, window: number): void {
@@ -80,6 +80,7 @@ export async function createOnlineServer(options: Options = {}) {
         if (v.version !== ONLINE_VERSION || typeof v.name !== 'string' || typeof v.loadout !== 'string' || !isWorldSeed(Number(v.seed)))
           throw new HttpError(400, 'Versão, nome, equipamento ou semente inválidos.');
         const room = new OnlineRoom(Number(v.seed));
+        room.persist=persist;
         try { const ticket = room.join(v.name,v.loadout); rooms.set(room.id,room); json(res,201,ticket); }
         catch (error) { room.dispose(); throw new HttpError(400,(error as Error).message); }
         return;
@@ -115,7 +116,9 @@ export async function createOnlineServer(options: Options = {}) {
         json(res,200,{ ok: accepted, sequence: member.sequence }); return;
       }
       if (action === 'command' && req.method === 'POST') {
-        const result = room.command(member,await body(req)); json(res,result.ok?200:400,result); return;
+        const value=await body(req);
+        const result=value.type==='event'?await room.worldCommand(member,value):room.command(member,value);
+        json(res,result.ok?200:400,result); return;
       }
       if (action === 'leave' && req.method === 'POST') {
         streams.get(member)?.end(); streams.delete(member); room.members.delete(member.id); json(res,200,{ ok:true }); return;
@@ -158,15 +161,16 @@ export async function createOnlineServer(options: Options = {}) {
       else if (!playing && now-room.lastActive > 7*24*60*60*1000) { room.dispose(); rooms.delete(id); }
     }
   },10_000);
-  function persist(): Promise<void> {
-    if (!options.dataDir) return Promise.resolve();
+  async function persist(): Promise<{ok:boolean;message?:string}> {
+    if (!options.dataDir) return {ok:true};
     const data = JSON.stringify([...rooms.values()].map(room => room.save()));
+    let result:{ok:boolean;message?:string}={ok:true};
     saving = saving.then(async () => {
       const destination = resolve(options.dataDir!,'rooms.json'), temp = destination+'.tmp';
       try { await writeFile(temp,data,{mode:0o600}); await rename(temp,destination); saveError = ''; }
-      catch (error) { saveError = (error as Error).message; console.error('Online save failed:',saveError); }
+      catch (error) { saveError = (error as Error).message;result={ok:false,message:'Não foi possível salvar. A ação não foi aplicada.'};console.error('Online save failed:',saveError); }
     });
-    return saving;
+    await saving;return result;
   }
   const saves = setInterval(() => { void persist(); },10_000);
   async function close(): Promise<void> {

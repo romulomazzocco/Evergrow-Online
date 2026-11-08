@@ -3,6 +3,7 @@ import type { GroundItem } from './character-types.ts';
 import type { GroundGold } from './gold.ts';
 import type { ActiveGroundEffect } from './ground-effects.ts';
 import type { ChainFlight } from './chain-lightning.ts';
+import type { EventState, EventSite, EventChoice } from './poi-content.ts';
 
 export const ONLINE_VERSION = 1;
 export const ONLINE_LIMITS = { players: 4, rooms: 32, inputAge: 600, reconnect: 120_000, body: 8192 } as const;
@@ -10,10 +11,11 @@ export const idleInput = (): Input => ({ moveX: 0, moveY: 0, aimX: 0, aimY: 0, a
 export interface RoomTicket { version: number; room: string; invite: string; player: string; token: string; seed: number; }
 export interface OnlineSnapshot {
   version: number; tick: number; time: number; self: string;
-  players: { id: string; connected: boolean; player: Player }[];
+  players: { id: string; connected: boolean; player: Player; channel?: {site:EventSite;choice:EventChoice|null;elapsed:number} }[];
   enemies: Enemy[]; projectiles: Projectile[]; groundEffects: ActiveGroundEffect[]; chains: ChainFlight[];
   pickups: Pickup[]; groundItems: GroundItem[]; groundGold: GroundGold[]; brokenContainers: string[];
   events: { player: string | null; event: CombatEvent }[];
+  eventState: EventState;
 }
 export function encodeOnline(value: unknown): string {
   return JSON.stringify(value, (_key, v: unknown) => v instanceof Set ? { $set: [...v] } : v);

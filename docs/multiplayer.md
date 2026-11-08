@@ -76,7 +76,9 @@ O contêiner executa como usuário sem privilégios e mantém os saves no volume
 
 O cooperativo implementa exploração no mundo procedural, combate, inimigos compartilhados, equipamento, progressão, habilidades, serviços da cidade, armazenamento pessoal, recolhimento e transferência de loot, morte e retorno ao acampamento. Pressione E perto de um comerciante ou clique nele para abrir o serviço. Compras e melhorias usam preços calculados pelo servidor e validam a distância até o comerciante. Para entregar um item a um amigo, solte-o pelo inventário e peça que ele o recolha.
 
-As telas e o combate usam o código original. Eventos interativos, viagens, masmorras, Expedições, Crimson Rifts, suporte touch e controles de console continuam disponíveis no modo solo e ainda precisam de fluxos cooperativos.
+Os eventos do mundo usam um registro compartilhado. Pressione E ou clique no objetivo próximo para inspecionar suas opções. Guardiões, ondas, selos, canais de ritual e baús avançam para a sala inteira; a experiência de conclusão é repartida entre os personagens próximos e o loot é criado uma única vez. O servidor salva a recompensa e o registro de resgate antes de publicá-los. Se a gravação falhar, nenhuma recompensa ou abertura é aplicada.
+
+As telas e o combate usam o código original. Viagens, masmorras, Expedições, Crimson Rifts, suporte touch e controles de console continuam disponíveis no modo solo e ainda precisam de fluxos cooperativos.
 
 As salas são privadas por convite, sem cadastro. O servidor aceita no máximo 32 salas por processo. Esta implementação usa um processo com saves em disco; múltiplas réplicas independentes não compartilham salas. A página `/api/health` retorna o estado do processo e responde com 503 se o último salvamento falhar.
 
@@ -89,7 +91,7 @@ npm test
 npm run build
 ```
 
-Os testes online verificam os jogadores independentes, o avanço único dos inimigos, dano em combate, projéteis, ausência de fogo amigo, XP compartilhado, moedas, credenciais, comandos inválidos, expiração de comandos, exclusão de nascimento nas câmeras e preservação de progresso. A integração abre dois clientes HTTP reais, reconecta um jogador e reinicia o servidor para verificar o save. Não há automação de gameplay no navegador.
+Os testes online verificam os jogadores independentes, o avanço único dos inimigos, dano em combate, projéteis, ausência de fogo amigo, XP compartilhado, moedas, credenciais, comandos inválidos, expiração de comandos, exclusão de nascimento nas câmeras e preservação de progresso. Verificam também os preços e o alcance dos comerciantes, a coleta concorrente de um item, o resgate único de eventos e o rollback quando a gravação falha. A integração abre dois clientes HTTP reais, reconecta um jogador e reinicia o servidor para verificar o save. Um teste usa o mesmo transporte do navegador e verifica a substituição de uma aba duplicada sem ciclos de reconexão. Não há automação de gameplay no navegador.
 
 ## Código e licença
 

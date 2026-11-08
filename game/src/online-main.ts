@@ -24,6 +24,8 @@ import { ServicePanel } from './service-panel.ts';
 import { buildingNPC, focusNPC } from './npcs.ts';
 import { refreshCharacter } from './character.ts';
 import type { CharacterSheet } from './character-types.ts';
+import { EventPanel } from './poi-panel.ts';
+import { eventInteractionSites, focusEvent } from './poi-content.ts';
 
 installUITheme();
 const app=document.querySelector<HTMLElement>('#app')!;
@@ -99,10 +101,11 @@ class OnlineGame {
   private connected=false;
   private sending=false;
   private sequence=Date.now();
-  private panel:'inventory'|'skills'|'service'|null=null;
+  private panel:'inventory'|'skills'|'service'|'event'|null=null;
   private inventory:InventoryPanel;
   private skills:SkillTreePanel;
   private service:ServicePanel;
+  private events:EventPanel;
   private companions:Player[]=[];
   private lastParty='';
   private reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -135,6 +138,7 @@ class OnlineGame {
           return {ok:result.ok===true,message:String(result.message??'')};
         }catch(error){return {ok:false,message:(error as Error).message};}
       }});
+    this.events=new EventPanel(mount,{close:()=>this.closePanel(),choose:(site,choice)=>{this.closePanel();this.command({type:'event',id:site.id,choice});}});
     this.client=new OnlineClient(ticket,snapshot=>this.snapshot(snapshot),(status,connected)=>{
       this.connected=connected;const label=app.querySelector<HTMLElement>('#online-connection');if(label){label.textContent=status;label.dataset.connected=String(connected);}
       if(!connected)this.input.clear();
@@ -162,6 +166,7 @@ class OnlineGame {
       const loot=hoveredGroundLoot(this.renderer.groundLootLabels,this.input.pointer.x,this.input.pointer.y);
       if(event.button===0&&loot){this.command({type:'pickup',id:loot.id});return;}
       if(event.button===0&&this.openService(this.renderer.screenToWorld(this.input.pointer.x,this.input.pointer.y)))return;
+      if(event.button===0&&this.openEvent(this.renderer.screenToWorld(this.input.pointer.x,this.input.pointer.y)))return;
       this.input.pointerDown(event.button);
     },{signal});
     window.addEventListener('pointerup',event=>this.input.pointerUp(event.button),{signal});
@@ -171,7 +176,7 @@ class OnlineGame {
       if(event.code==='KeyI'||event.code==='KeyC'){event.preventDefault();if(!event.repeat)this.openPanel('inventory');return;}
       if(event.code==='KeyT'){event.preventDefault();if(!event.repeat)this.openPanel('skills');return;}
       if(this.panel)return;
-      if(controls.action(event.code)==='interact'){event.preventDefault();if(!event.repeat)this.openService();return;}
+      if(controls.action(event.code)==='interact'){event.preventDefault();if(!event.repeat&&!this.openService())this.openEvent();return;}
       if(controls.action(event.code)){event.preventDefault();this.input.keyDown(event.code);}
     },{signal});
     window.addEventListener('keyup',event=>this.input.keyUp(event.code),{signal});
@@ -190,7 +195,12 @@ class OnlineGame {
     if(!this.connected){this.toast('Aguarde a conexão com a sala.');return;}
     void this.client.post('command',value).catch(error=>this.toast((error as Error).message));
   }
-  private closePanel():void {this.inventory.close();this.skills.close();this.service.close();this.panel=null;this.input.clear();this.canvas.focus();}
+  private closePanel():void {this.inventory.close();this.skills.close();this.service.close();this.events.close();this.panel=null;this.input.clear();this.canvas.focus();}
+  private openEvent(pointer?:{x:number;y:number}):boolean {
+    const p=this.sim.player,sites=eventInteractionSites(this.world.getEventSites(p.x-1200,p.y-1200,2400,2400),this.sim.eventState,this.world);
+    const site=focusEvent(sites,p,this.world,pointer);if(!site)return false;
+    this.closePanel();this.panel='event';this.events.open(site);return true;
+  }
   private openService(pointer?:{x:number;y:number}):boolean {
     const p=this.sim.player,npc=focusNPC(this.world.getBuildings(p.x-200,p.y-200,400,400).flatMap(building=>{
       const npc=buildingNPC(building);return npc?[npc]:[];
@@ -228,6 +238,9 @@ class OnlineGame {
     Object.assign(this.sim.player,own.player);this.sim.time=snapshot.time;this.sim.enemies=snapshot.enemies;this.sim.projectiles=snapshot.projectiles;
     this.sim.groundEffects=snapshot.groundEffects;this.sim.chains=snapshot.chains;this.sim.pickups=snapshot.pickups;
     this.sim.groundItems=snapshot.groundItems;this.sim.groundGold=snapshot.groundGold;
+    this.sim.eventState=snapshot.eventState;
+    if(own.channel){this.sim.eventChannel.start(own.channel.site,own.channel.choice);this.sim.eventChannel.elapsed=own.channel.elapsed;}
+    else this.sim.eventChannel.cancel();
     this.sim.brokenContainers.clear();for(const id of snapshot.brokenContainers)this.sim.brokenContainers.add(id);
     this.world.setBrokenContainers(this.sim.brokenContainers);
     this.companions=snapshot.players.filter(member=>member.id!==snapshot.self&&member.connected).map(member=>member.player);
@@ -267,7 +280,7 @@ class OnlineGame {
   }
   dispose():void {
     this.abort.abort();this.client.dispose();clearInterval(this.inputTimer);cancelAnimationFrame(this.frame);
-    this.inventory.dispose();this.skills.dispose();this.service.dispose();this.renderer.reset();this.fx.dispose();this.audio.dispose();this.world.dispose();
+    this.inventory.dispose();this.skills.dispose();this.service.dispose();this.events.dispose();this.renderer.reset();this.fx.dispose();this.audio.dispose();this.world.dispose();
   }
 }
 

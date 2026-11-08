@@ -10,6 +10,7 @@ import { refreshCharacter } from '../src/character.ts';
 import { buildingNPC } from '../src/npcs.ts';
 import { quoteService } from '../src/commerce.ts';
 import { generateItem } from '../src/items.ts';
+import { eventProblem } from '../src/poi-command.ts';
 
 const flat: WorldQuery = { seed:7319, blocked:()=>false, move:(x,y,dx,dy)=>({x:x+dx,y:y+dy}) };
 function party(){
@@ -137,4 +138,32 @@ test('two players cannot collect the same transferred item',()=>{
   assert.equal(room.sim.groundItems.length,0);
   const count=[a,b].flatMap(member=>member.sim.player.character.inventory).filter(entry=>entry?.id===drop.item.id).length;
   assert.equal(count,1);room.dispose();
+});
+test('an event claim saves one shared receipt and rolls back all rewards when storage fails',async()=>{
+  const room=new OnlineRoom(7319),ticket=room.join('Alice','sword'),other=room.join('Bob','bow');
+  const a=room.authenticate(ticket.token)!,b=room.authenticate(other.token)!;a.connected=b.connected=true;
+  let selected:ReturnType<typeof room.world.getEventSites>[number]|undefined;
+  for(const site of room.world.getEventSites(-4000,-4000,8000,8000).filter(site=>site.kind==='reliquary')){
+    for(let i=0;i<16;i++){
+      Object.assign(a.sim.player,{x:site.x+Math.cos(i*Math.PI/8)*50,y:site.y+Math.sin(i*Math.PI/8)*50});
+      if(!eventProblem(a.sim,site,null)){selected=site;break;}
+    }
+    if(selected)break;
+  }
+  assert.ok(selected,'Expected a reachable generated roadside cache');
+  Object.assign(b.sim.player,{x:a.sim.player.x,y:a.sim.player.y});
+  const action={type:'event',id:selected.id,choice:null},before=a.sim.player.xp;
+  room.persist=async()=>({ok:false,message:'Disk full'});
+  assert.equal((await room.worldCommand(a,action)).ok,false);
+  assert.equal(room.sim.eventState.sites[selected.id],undefined);assert.equal(a.sim.player.xp,before);assert.equal(b.sim.player.xp,0);
+  let saved:ReturnType<OnlineRoom['save']>|undefined;
+  room.persist=async()=>{saved=JSON.parse(JSON.stringify(room.save()));return {ok:true};};
+  const first=room.worldCommand(a,action),rival=room.worldCommand(b,action);
+  assert.equal((await first).ok,true);assert.equal((await rival).ok,false);
+  const drops=room.sim.groundItems.length;
+  assert.equal((await room.worldCommand(b,action)).ok,false);assert.equal(room.sim.groundItems.length,drops);
+  assert.ok(saved);const restored=OnlineRoom.restore(saved);
+  assert.equal((await restored.worldCommand(restored.authenticate(ticket.token)!,action)).ok,false);
+  assert.deepEqual(restored.sim.eventState,room.sim.eventState);
+  room.dispose();restored.dispose();
 });

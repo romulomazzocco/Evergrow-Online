@@ -2,7 +2,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { Simulation } from '../src/simulation.ts';
 import { WorldLandscape } from '../src/world-landscape.ts';
 import { createCharacterSheet, isStarterLoadoutId } from '../src/items.ts';
-import { refreshCharacter } from '../src/character.ts';
+import { refreshCharacter, awardCharacterExperience } from '../src/character.ts';
 import { executeCharacterCommand, type CharacterCommand } from '../src/character-commands.ts';
 import { EQUIPMENT_SLOTS } from '../src/items.ts';
 import { SKILL_DEFINITIONS } from '../src/skill-content.ts';
@@ -14,6 +14,10 @@ import { addGroundItem } from '../src/ground-loot.ts';
 import type { CharacterSheet } from '../src/character-types.ts';
 import { LOOT_RULES } from '../src/combat-content.ts';
 import type { CombatViewport } from '../src/combat-visibility.ts';
+import { executeEvent, eventProblem, claimCompletedEvent, pendingEventReward } from '../src/poi-command.ts';
+import type { EventChoice } from '../src/poi-content.ts';
+import type { ActionResult } from '../src/character-types.ts';
+import { xpForNextLevel } from '../src/progression.ts';
 import { idleInput, ONLINE_LIMITS, ONLINE_VERSION, object, type OnlineSnapshot, type RoomTicket } from '../src/online-protocol.ts';
 import type { Input } from '../src/model.ts';
 import type { CharacterCheckpoint } from '../src/character-save.ts';
@@ -41,6 +45,10 @@ export class OnlineRoom {
   tick = 0;
   lastActive = Date.now();
   private pendingEvents: OnlineSnapshot['events'] = [];
+  private staged?: SavedRoom;
+  private busy=false;
+  private nextEventAt=0;
+  persist?:()=>Promise<ActionResult>;
 
   constructor(seed: number, identity = { id: randomBytes(9).toString('base64url'), invite: secret() }) {
     this.id = identity.id; this.invite = identity.invite; this.seed = seed;
@@ -83,6 +91,7 @@ export class OnlineRoom {
     member.viewport=checked(viewport);member.exclusion=checked(exclusion);
   }
   advance(now = Date.now()): void {
+    if(this.busy)return;
     const active = [...this.members.values()].filter(member => member.connected);
     if (!active.length) return;
     this.lastActive = now;
@@ -106,18 +115,89 @@ export class OnlineRoom {
     this.pendingEvents.push(...this.sim.drainEvents().map(event => ({ player: null, event })));
     // Slow/absent stream consumers cannot grow the event queue without bound.
     if (this.pendingEvents.length > 512) this.pendingEvents.splice(0, this.pendingEvents.length-512);
+    if(now>=this.nextEventAt){
+      this.nextEventAt=now+250;
+      const member=active.find(m=>m.sim.eventChannel.ready||Object.values(this.sim.eventState.sites).some(record=>pendingEventReward(m.sim,record)));
+      if(member)void this.worldCommand(member,{type:'claimReady'}).then(result=>{
+        if(!result.ok)this.nextEventAt=now+30_000;
+        if(result.message)this.pendingEvents.push({player:member.id,event:{type:'notice',x:member.sim.player.x,y:member.sim.player.y,message:result.message}});
+      }).catch(()=>{this.nextEventAt=now+30_000;});
+    }
   }
   frame(): Omit<OnlineSnapshot, 'self'> {
     const sims = [...this.members.values()].map(member => member.sim);
     const events = this.pendingEvents; this.pendingEvents = [];
     return { version: ONLINE_VERSION, tick: this.tick, time: this.sim.time,
-      players: [...this.members.values()].map(member => ({ id: member.id, connected: member.connected, player: member.sim.player })),
+      players: [...this.members.values()].map(member => ({ id: member.id, connected: member.connected, player: member.sim.player,
+        ...(member.sim.eventChannel.site?{channel:{site:member.sim.eventChannel.site,choice:member.sim.eventChannel.choice,elapsed:member.sim.eventChannel.elapsed}}:{}) })),
       enemies: this.sim.enemies, projectiles: [...this.sim.projectiles, ...sims.flatMap(sim => sim.projectiles)],
       groundEffects: sims.flatMap(sim => sim.groundEffects), chains: sims.flatMap(sim => sim.chains),
       pickups: this.sim.pickups, groundItems: this.sim.groundItems, groundGold: this.sim.groundGold,
-      brokenContainers: [...this.sim.brokenContainers], events };
+      brokenContainers: [...this.sim.brokenContainers], eventState:this.sim.eventState,events };
+  }
+  async worldCommand(member:OnlineMember,value:unknown):Promise<ActionResult>{
+    if(this.busy)return {ok:false,message:'Aguarde a ação em andamento.'};
+    const v=object(value);if(!v)return {ok:false,message:'Ação inválida.'};
+    this.busy=true;this.sim.copyCooperativeWorldTo(member.sim);
+    const partners:{member:OnlineMember;checkpoint:CharacterCheckpoint;xp:number;levels:number}[]=[];
+    const persist=async(checkpoint:CharacterCheckpoint):Promise<{ok:boolean;message:string}>=>{
+      const staged=this.save();staged.checkpoint=checkpoint;
+      const before=member.sim.player;
+      let xp=checkpoint.xp-before.xp;
+      for(let level=before.level;level<checkpoint.level;level++)xp+=xpForNextLevel(level);
+      for(const entry of staged.members){
+        if(entry.id===member.id)entry.checkpoint=checkpoint;
+        else{entry.checkpoint.events=checkpoint.events;entry.checkpoint.expeditions=checkpoint.expeditions;
+          entry.checkpoint.groundItems=checkpoint.groundItems;entry.checkpoint.groundGold=checkpoint.groundGold;entry.checkpoint.pickups=checkpoint.pickups;
+          const other=this.members.get(entry.id)!;
+          if(xp>0&&other.connected&&!other.sim.player.dead&&Math.hypot(other.sim.player.x-before.x,other.sim.player.y-before.y)<=1200){
+            const player=structuredClone(other.sim.player),levels=awardCharacterExperience(player,xp);
+            Object.assign(entry.checkpoint,{character:player.character,chronicle:player.chronicle,level:player.level,xp:player.xp,hp:player.hp,mana:player.mana});
+            partners.push({member:other,checkpoint:entry.checkpoint,xp,levels});
+          }
+        }
+      }
+      this.staged=staged;const result=this.persist?await this.persist():{ok:true};return {...result,message:result.message??''};
+    };
+    try{
+      let result:ActionResult;
+      const sim=member.sim;
+      if(v.type==='claimReady'){
+        const channel=sim.eventChannel;
+        if(channel.ready&&channel.site){
+          const site=channel.site,target=site.kind==='watchtower'?this.world.getPOIs(site.x-2400,site.y-2400,4800,4800)
+            .filter(poi=>poi.id!==site.id&&!this.sim.eventState.sites[poi.id])
+            .sort((a,b)=>Math.hypot(a.x-site.x,a.y-site.y)-Math.hypot(b.x-site.x,b.y-site.y))[0]:undefined;
+          result=await executeEvent(sim,site,channel.choice,persist,target);channel.cancel();
+        }else{
+          const record=Object.values(this.sim.eventState.sites).find(record=>pendingEventReward(sim,record));
+          if(!record)return {ok:false};
+          result=await claimCompletedEvent(sim,record.id,persist);
+        }
+      }else if(v.type==='event'&&typeof v.id==='string'&&v.id.length<200&&(v.choice===null||['goods','coin','haste','wellspring','bulwark','fleet'].includes(String(v.choice)))){
+        const p=sim.player,site=this.world.getEventSites(p.x-1200,p.y-1200,2400,2400).find(site=>site.id===v.id);
+        if(!site)return {ok:false,message:'Evento indisponível.'};
+        const choice=v.choice as EventChoice|null,problem=eventProblem(sim,site,choice);
+        if(problem)return {ok:false,message:problem};
+        if(site.kind==='watchtower'||site.kind==='standingStones'){
+          sim.clearInput();sim.eventChannel.start(site,choice);return {ok:true};
+        }
+        result=await executeEvent(sim,site,choice,persist);
+      }else return {ok:false,message:'Ação inválida.'};
+      if(result.ok){
+        for(const reward of partners){
+          const p=reward.member.sim.player,saved=reward.checkpoint;
+          Object.assign(p,{character:saved.character,chronicle:saved.chronicle,level:saved.level,xp:saved.xp,hp:saved.hp,mana:saved.mana});refreshCharacter(p);
+          this.pendingEvents.push({player:reward.member.id,event:{type:'experience',x:p.x,y:p.y,amount:reward.xp}});
+          if(reward.levels)this.pendingEvents.push({player:reward.member.id,event:{type:'level',x:p.x,y:p.y,level:p.level,skillPoints:reward.levels,statPoints:reward.levels*5,color:'#c0acf0'}});
+        }
+        sim.copyCooperativeWorldTo(this.sim);for(const other of this.members.values())this.sim.copyCooperativeWorldTo(other.sim);
+      }
+      return result;
+    }finally{this.staged=undefined;this.busy=false;}
   }
   command(member: OnlineMember, value: unknown): { ok: boolean; message?: string; character?: CharacterSheet } {
+    if(this.busy)return {ok:false,message:'Aguarde a ação em andamento.'};
     const v = object(value), sim = member.sim;
     if (!v || typeof v.type !== 'string') return { ok: false, message: 'Comando inválido.' };
     if (v.type === 'revive') {
@@ -207,6 +287,7 @@ export class OnlineRoom {
     return executeCharacterCommand(sim.player, v as unknown as CharacterCommand);
   }
   save(now = Date.now()): SavedRoom {
+    if(this.staged)return this.staged;
     return { version: 1, id: this.id, invite: this.invite, seed: this.seed, tick: this.tick, savedAt: now,
       checkpoint: this.sim.captureCheckpoint(), members: [...this.members.values()].map(member => ({ id: member.id,
         token: member.token, name: member.sim.player.name ?? 'Viajante', checkpoint: member.sim.captureCheckpoint() })) };
