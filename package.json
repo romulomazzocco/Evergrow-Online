@@ -2,6 +2,9 @@
   "name": "evergrow-workspace",
   "private": true,
   "scripts": {
+    "online:server": "npm --prefix game run online:server",
+    "online:dev": "node scripts/dev-online.mjs",
+    "online:test": "npm --prefix game run online:test",
     "setup": "npm --prefix game ci",
     "dev": "npm --prefix game run dev",
     "build": "npm --prefix game run build",

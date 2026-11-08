@@ -1,0 +1,10 @@
+.git
+**/node_modules
+**/dist
+**/online-data
+**/test-results
+**/playwright-report
+.env*
+android
+chromatic
+docs/captures

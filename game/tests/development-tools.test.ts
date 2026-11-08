@@ -14,14 +14,15 @@ import { World } from '../src/world.ts';
 import type { WorldQuery } from '../src/model.ts';
 const root=new URL('../',import.meta.url);
 const emptyWorld:WorldQuery={seed:7319,blocked:()=>false,move:(x,y,dx,dy)=>({x:x+dx,y:y+dy})};
+const playablePages=new Set(['index.html','online.html']);
 test('every local review belongs to a discoverable workspace and imports shared navigation',()=>{
   assert.equal(new Set(TOOLS.map(t=>t.id)).size,TOOLS.length);
   for(const tool of TOOLS){assert.ok(WORKSPACES.some(w=>w.id===tool.group));assert.ok(existsSync(new URL('.'+new URL(tool.path,'http://local').pathname,root)),tool.path);}
-  for(const directory of ['', 'tools/'])for(const file of readdirSync(new URL(directory,root)).filter(f=>f.endsWith('.html')&&f!=='index.html')){
+  for(const directory of ['', 'tools/'])for(const file of readdirSync(new URL(directory,root)).filter(f=>f.endsWith('.html')&&!(directory===''&&playablePages.has(f))&&f!=='index.html')){
     const path=`/${directory}${file}`;assert.ok(toolForPath(path),`${path} missing from Tools`);
     assert.match(readFileSync(new URL(directory+file,root),'utf8'),/src\/tools\/review-nav.ts/);
   }
-  assert.doesNotMatch(readFileSync(new URL('index.html',root),'utf8'),/tools\//,'runtime HTML must not import developer tools');
+  for(const file of playablePages)assert.doesNotMatch(readFileSync(new URL(file,root),'utf8'),/tools\//,'runtime HTML must not import developer tools');
 });
 test('workspace navigation preserves review variants and rejects external or unrelated pages',()=>{
   const item=TOOLS.find(t=>t.id==='equipment')!;

@@ -6,6 +6,8 @@
 **/*.tsbuildinfo
 .DS_Store
 *.log
+online-data/
+game/online-data/
 .env
 .env.*
 !.env.example

@@ -13,6 +13,7 @@ import { segmentDistanceSquared } from './combat-geometry.ts';
 
 export const MAX_PROJECTILES = 128;
 export interface ProjectileContext {
+  party?: readonly { player: Player; hurt: ProjectileContext['hurt'] }[];
   containers?: ContainerAttackContext;
   schedule(effect: GroundEffectRequest): void;
   player: Player; enemies: Enemy[]; world: WorldQuery;
@@ -130,7 +131,6 @@ function advancePursuit(shot:Projectile,dt:number,context:ProjectileContext):voi
 
 /** Bounded swept missiles; revisits require an explicit, finite Unique rebound budget. */
 export function advanceProjectiles(projectiles: Projectile[], dt: number, context: ProjectileContext): void {
-  const p = context.player;
   for (const projectile of projectiles) {
     projectile.life -= dt;
     if (projectile.life <= 0 && !turnProjectile(projectile)) continue;
@@ -150,6 +150,13 @@ export function advanceProjectiles(projectiles: Projectile[], dt: number, contex
         if(!turnProjectile(projectile))projectile.life = 0; break;
       }
       if (projectile.owner === 'enemy') {
+        const target = context.party?.filter(member => !member.player.dead).find(member => {
+          const p = member.player, decoy = p.skillEffects?.decoy;
+          return segmentDistanceSquared(p.x,p.y,oldX,oldY,projectile.x,projectile.y) <= (projectile.radius+p.radius)**2
+            || !!decoy && segmentDistanceSquared(decoy.x,decoy.y,oldX,oldY,projectile.x,projectile.y) <= (projectile.radius+decoy.radius)**2;
+        });
+        if (context.party && !target) continue;
+        const p = target?.player ?? context.player;
         const decoy=p.skillEffects?.decoy;
         const playerHit=segmentDistanceSquared(p.x,p.y,oldX,oldY,projectile.x,projectile.y)<=(projectile.radius+p.radius)**2;
         if(decoy&&decoy.hp>0&&segmentDistanceSquared(decoy.x,decoy.y,oldX,oldY,projectile.x,projectile.y)<=(projectile.radius+decoy.radius)**2
@@ -157,7 +164,7 @@ export function advanceProjectiles(projectiles: Projectile[], dt: number, contex
           hurtDecoy(p,decoy.id,projectile.damage);context.emit({type:'blast',x:decoy.x,y:decoy.y,radius:12,style:'spirit'});projectile.life=0;continue;
         }
         if (segmentDistanceSquared(p.x, p.y, oldX, oldY, projectile.x, projectile.y) <= (projectile.radius + p.radius) ** 2) {
-          context.hurt(projectile.damage, projectile.angle, projectile.sourceLevel, projectileDamageType(projectile.effects?.style ?? 'arcane'), projectile.sourceKind); projectile.life = 0;
+          (target?.hurt ?? context.hurt)(projectile.damage, projectile.angle, projectile.sourceLevel, projectileDamageType(projectile.effects?.style ?? 'arcane'), projectile.sourceKind); projectile.life = 0;
         }
         continue;
       }

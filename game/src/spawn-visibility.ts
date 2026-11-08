@@ -1,6 +1,7 @@
 import type { Enemy } from './model.ts';
 
 export interface SpawnExclusion {
+  readonly others?: readonly SpawnExclusion[];
   readonly x: number;
   readonly y: number;
   readonly width: number;
@@ -28,5 +29,6 @@ export function isSpawnHidden(x: number, y: number, exclusion: SpawnExclusion | 
   const top = exclusion.y - SPAWN_VISIBILITY_MARGIN.vertical - radius;
   const bottom = exclusion.y + exclusion.height + SPAWN_VISIBILITY_MARGIN.vertical + radius;
   if (![left, right, top, bottom].every(Number.isFinite)) return false;
-  return x < left || x > right || y < top || y > bottom;
+  return (x < left || x > right || y < top || y > bottom)
+    && (exclusion.others?.every(view => isSpawnHidden(x,y,view,radius)) ?? true);
 }

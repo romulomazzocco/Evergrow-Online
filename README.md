@@ -1,4 +1,15 @@
-# Evergrow
+# Evergrow Online
+
+Cooperativo por salas privadas para até quatro jogadores, baseado no [Evergrow de Dimillian](https://github.com/Dimillian/Evergrow). [Código deste fork](https://github.com/romulomazzocco/Evergrow-Online). O servidor simula o mundo e o combate; os jogadores compartilham inimigos, experiência e itens no chão.
+
+```sh
+npm run setup
+npm run online:dev
+```
+
+Abra [Evergrow Online local](http://127.0.0.1:5173/online.html), crie uma sala e use **Copiar convite**. Para jogar pela internet, todos precisam acessar a mesma instalação HTTPS do servidor. [Execução, hospedagem e funcionamento das salas](docs/multiplayer.md).
+
+O modo solo original continua disponível em `/index.html`. O texto abaixo descreve o projeto original e inclui recursos que ainda pertencem ao modo solo.
 
 [What’s new](CHANGELOG.md) · Read the same update notes from the game’s main menu.
 
