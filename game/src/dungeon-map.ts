@@ -193,7 +193,8 @@ export class DungeonMap {
         this.tooltip.style.left = `${Math.min(clientX + 16, window.innerWidth - this.tooltip.offsetWidth - 12)}px`;
         this.tooltip.style.top = `${Math.min(clientY + 16, window.innerHeight - this.tooltip.offsetHeight - 12)}px`;
     }
-    update(player: { x: number; y: number; angle: number }, enemies:readonly MapEnemy[]=[]) {
+    update(player: { x: number; y: number; angle: number }, enemies:readonly MapEnemy[]=[], run?:DungeonRun) {
+        if(run)this.run=run;
         this.enemies=enemies;
         if (this.element.hidden) return;
         if (this.explorationMode) this.center = { x: player.x, y: player.y };

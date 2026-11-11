@@ -19,23 +19,23 @@ export function mapTravelProblem(sim: Simulation, discoveries: TravelDiscoveries
 
 /** Resolve an ID against the character's chart, never coordinates supplied by UI.
  * Preserve home/return ownership, resources and encounter contents on every trip. */
-export async function executeMapTravel(sim: Simulation, discoveries: TravelDiscoveries, id: string, persist: Persist): Promise<Result> {
+export async function executeMapTravel(sim: Simulation, discoveries: TravelDiscoveries, id: string, persist: Persist, interrupt = true): Promise<Result> {
   const problem = mapTravelProblem(sim, discoveries, id);
   if (problem) return { ok: false, message: problem };
   const poi = discoveries.getDiscoveredPOI(id)!;
   const point = portalLanding(sim.world, { x: poi.x, y: poi.y + 42 }, sim.player.radius);
   if (!point) return { ok: false, message: 'No clear landing near this location.' };
   const checkpoint = sim.captureCheckpoint();
-  interruptTrial(checkpoint.events!, checkpoint.actors ?? []);
+  if(interrupt)interruptTrial(checkpoint.events!, checkpoint.actors ?? []);
   checkpoint.x = point.x; checkpoint.y = point.y;
   const result = await persist(checkpoint);
   if (!result.ok) return result;
-  interruptTrial(sim.eventState, sim.enemies);
+  if(interrupt)interruptTrial(sim.eventState, sim.enemies);
   sim.eventChannel.cancel(); sim.relocate(point.x, point.y);
   return { ok: true, message: poi.name };
 }
 /** Stage position and portal ownership in one checkpoint, then publish only after durable storage. */
-export async function executePortalTravel(sim: Simulation, anchor: PortalAnchor, returning: boolean, persist: Persist): Promise<Result> {
+export async function executePortalTravel(sim: Simulation, anchor: PortalAnchor, returning: boolean, persist: Persist, interrupt = true): Promise<Result> {
   const p = sim.player, link = sim.travel.returnTo;
   if (returning) {
     if (!link || link.town !== anchor.band || !withinPortalReach(p, anchor, sim.world)) return { ok: false, message: 'Return portal is out of reach.' };
@@ -49,12 +49,12 @@ export async function executePortalTravel(sim: Simulation, anchor: PortalAnchor,
     sim.portal.cancel(); return { ok: false, message: returning ? 'Return point blocked.' : 'Town arrival blocked.' };
   }
   const checkpoint = sim.captureCheckpoint();
-  if(!returning)interruptTrial(checkpoint.events!,checkpoint.actors??[]);
+  if(!returning&&interrupt)interruptTrial(checkpoint.events!,checkpoint.actors??[]);
   checkpoint.x = point.x; checkpoint.y = point.y;
   checkpoint.travel = { ...sim.travel, returnTo: returning ? null : { x: p.x, y: p.y, town: anchor.band } };
   const result = await persist(checkpoint);
   if (!result.ok) { sim.portal.cancel(); return result; }
-  if(!returning)interruptTrial(sim.eventState,sim.enemies);
+  if(!returning&&interrupt)interruptTrial(sim.eventState,sim.enemies);
   sim.travel = checkpoint.travel; sim.relocate(point.x, point.y);
   return { ok: true, message: returning ? 'Returned to your expedition.' : anchor.name };
 }

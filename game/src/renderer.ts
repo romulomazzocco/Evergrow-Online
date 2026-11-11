@@ -105,6 +105,9 @@ import { EnemyDeaths } from './death-presentation.ts';
 import { drawEnemyRemains, deathDepth, resetDeathArt } from './death-art.ts';
 interface Ghost { x: number; y: number; angle: number; gait: number; life: number; }
 export interface RenderSettings {
+  /** Network snapshots interpolate over their delivery interval, not a local fixed tick. */
+  interpolationAlpha?: number;
+  companions?: readonly Player[];
   /** Local art comparisons only; gameplay uses the volume pass. */
   surfaceVolume?: boolean;
   liveMap?: boolean;
@@ -346,7 +349,7 @@ export class Renderer {
     this.cryptFloor=sim.dungeonFloor?.rift?null:sim.dungeonFloor;
     const setupStart = this.profiler?.start() ?? 0;
     const c = this.ctx, p = sim.player, active = settings.phase === 'playing' || settings.phase === 'map' && settings.liveMap === true;
-    const step = active ? dt : 0, alpha = sim.interpolationAlpha;
+    const step = active ? dt : 0, alpha = settings.interpolationAlpha ?? sim.interpolationAlpha;
     const feedbackStep = active || settings.phase === 'dead' ? dt : 0;
     this.eventProgressPresentation.update(this.cryptFloor ? null : eventProgress(sim.eventState), feedbackStep, settings.reducedMotion);
     this.rewards.update(goldBalance(p.character), feedbackStep, settings.reducedMotion);
@@ -510,6 +513,8 @@ export class Renderer {
     }
     // One unified contact/cast shadow per actor, beneath all depth-sorted silhouettes.
     this.drawActorShadow(px, py, p.radius, 44 * PLAYER_ART_SCALE);
+    for (const companion of settings.companions ?? []) this.drawActorShadow(
+      lerp(companion.prevX,companion.x,alpha), lerp(companion.prevY,companion.y,alpha), companion.radius, 44*PLAYER_ART_SCALE);
     for (const enemy of sim.enemies) {
       if (enemy.hp <= 0) continue;
       const x = lerp(enemy.prevX, enemy.x, alpha), y = lerp(enemy.prevY, enemy.y, alpha);
@@ -875,6 +880,14 @@ export class Renderer {
       this.actor(px, py, pose);
       drawPlayerSkillEffects(c,p,px,py,settings.reducedMotion?0:sim.time,pose,settings.reducedMotion);
     } });
+    for (const companion of settings.companions ?? []) {
+      const x = lerp(companion.prevX,companion.x,alpha), y = lerp(companion.prevY,companion.y,alpha);
+      entries.push({ y, stage: 'characters', draw: () => {
+        const pose = playerPose(companion,sim.time); pose.effectTime = settings.reducedMotion ? 0 : sim.time;
+        this.actor(x,y,pose);
+        drawPlayerSkillEffects(c,companion,x,y,settings.reducedMotion?0:sim.time,pose,settings.reducedMotion);
+      } });
+    }
     for(const scar of this.riftAtmosphere.visible)if(scar.float)entries.push({y:scar.y,stage:'props',draw:()=>this.riftAtmosphere.drawFragment(c,scar)});
     entries.sort((a, b) => a.y - b.y);
     for (const entry of entries) {

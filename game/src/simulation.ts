@@ -56,7 +56,7 @@ import { createCharacterSheet, TIER_COLORS } from './items.ts';
 import { deriveCharacterStats } from './character-stats.ts';
 import { addInventoryItem } from './inventory.ts';
 import { damageEnemy, damagePlayer } from './combat-damage.ts';
-import { awardKillRewards } from './combat-rewards.ts';
+import { awardKillRewards, awardEnemyExperience } from './combat-rewards.ts';
 import { advanceEnemyStatuses } from './combat-status.ts';
 import type { HitSnapshot } from './model.ts';
 import { scheduleGroundEffect, advanceGroundEffects, type ActiveGroundEffect } from './ground-effects.ts';
@@ -72,6 +72,7 @@ import { RoamingEncounters, ROAMING_RULES, ROAMING_GROUPS, roamingSpawnAnchor, s
 import { isSpawnHidden, type SpawnExclusion } from './spawn-visibility.ts';
 import { updateEnemyAI, type EnemyAIContext } from './enemy-ai.ts';
 import { PlayerMovement } from './player-movement.ts';
+import { advanceDungeonEvents } from './dungeon-events.ts';
 
 export const FIXED_STEP = COMBAT_TIMING.fixedStep;
 export const HIT_FLASH_DURATION = COMBAT_TIMING.hitFlashDuration;
@@ -162,6 +163,9 @@ export class Simulation {
   /** Read-only HUD progress; the existing saved kill counter remains authoritative. */
   get potionRecharge(): number { return Math.max(0, Math.min(1, this.killRecharge / PLAYER_ABILITIES.potion.killsPerCharge)); }
   private playerMovement = new PlayerMovement();
+  private partyTarget = new WeakMap<Enemy, Simulation>();
+  private damageOwners = new WeakMap<Enemy, Simulation>();
+  private rewardPartners: readonly Simulation[] = [];
 
   constructor(world: WorldQuery, options: SimulationOptions = {}) {
     this.world = world;
@@ -284,7 +288,7 @@ export class Simulation {
   }
 
   /** Automatic population waits for the camera's current/pending visible envelope. */
-  setSpawnExclusion(bounds: { x: number; y: number; width: number; height: number } | null): void {
+  setSpawnExclusion(bounds: SpawnExclusion | null): void {
     this.spawnExclusion = bounds && [bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
       && bounds.width > 0 && bounds.height > 0 ? { ...bounds } : null;
   }
@@ -294,7 +298,10 @@ export class Simulation {
       && bounds.width > 0 && bounds.height > 0 ? { ...bounds } : null;
   }
 
-  getCampState(id: string): CampState { return this.camps.getState(id); }
+  /** Network presentation can project cleared camps without restoring/resetting the run. */
+  clearedCampProjection:ReadonlySet<string>|null=null;
+  clearedCampIds():string[]{return this.camps.clearedIds();}
+  getCampState(id: string): CampState { return this.clearedCampProjection?.has(id)?'cleared':this.camps.getState(id); }
 
   /** Call when focus/control context changes, including pause and resume. */
   clearInput(preserveMovement = false): void {
@@ -342,6 +349,17 @@ export class Simulation {
 
   update(dt: number, input: Input): void {
     if (!Number.isFinite(dt) || dt <= 0 || this.player.dead) return;
+    this.queueInput(input);
+    // Bound catch-up after a suspended tab; normal frames always run at 120 Hz.
+    this.accumulator += Math.min(dt, 0.25);
+    while (this.accumulator + 1e-10 >= FIXED_STEP && !this.player.dead) {
+      this.accumulator -= FIXED_STEP;
+      this.step(FIXED_STEP, input);
+      if (this.portal.ready || this.eventChannel.ready) { this.accumulator = 0; break; }
+    }
+  }
+
+  private queueInput(input: Input): void {
     if (input.attack) this.attackBuffer = this.time + COMBAT_TIMING.attackBuffer;
     if (input.dodge) this.dodgeBuffer = this.time + COMBAT_TIMING.inputBuffer;
     if (this.skillBuffer && this.skillBuffer.until < this.time) this.skillBuffer = null;
@@ -354,13 +372,110 @@ export class Simulation {
       this.skillBuffer = { slot: input.skillSlot, until: this.time + recovery + COMBAT_TIMING.inputBuffer, pressed };
     }
     if (input.heal) this.healBuffer = this.time + COMBAT_TIMING.inputBuffer;
-    // Bound catch-up after a suspended tab; normal frames always run at 120 Hz.
-    this.accumulator += Math.min(dt, 0.25);
-    while (this.accumulator + 1e-10 >= FIXED_STEP && !this.player.dead) {
-      this.accumulator -= FIXED_STEP;
-      this.step(FIXED_STEP, input);
-      if (this.portal.ready || this.eventChannel.ready) { this.accumulator = 0; break; }
+  }
+
+  /** One server-owned world tick. Each member retains its own action buffers,
+   * missiles, cooldowns and rewards; enemies and ground loot advance only once. */
+  copyCooperativeWorldTo(sim: Simulation): void {
+    sim.world=this.world;sim.enemies=this.enemies;sim.groundItems=this.groundItems;sim.groundGold=this.groundGold;sim.pickups=this.pickups;
+    sim.nextId=this.nextId;sim.time=this.time;sim.damageOwners=this.damageOwners;sim.camps=this.camps;
+    sim.eventState=this.eventState;sim.expeditions=this.expeditions;sim.dungeonFloor=this.dungeonFloor;
+    sim.brokenContainers.clear();for(const id of this.brokenContainers)sim.brokenContainers.add(id);
+  }
+  updateCooperative(members: readonly { sim: Simulation; input: Input }[]): void {
+    const dt = FIXED_STEP;
+    if(members.length)this.player=(members.find(member=>!member.sim.player.dead)??members[0]).sim.player;
+    tickRift(this,dt);
+    const riftBefore=currentDungeon(this.expeditions)?.rift?.phase;
+    if(riftBefore==='failed')return;
+    this.capturePositions();
+    this.time += dt;
+    for (const enemy of this.enemies) enemy.hitFlash = Math.max(0, enemy.hitFlash - dt);
+    const share = (sim: Simulation) => {
+      this.copyCooperativeWorldTo(sim);
+      sim.rewardPartners = members.map(member => member.sim);
+    };
+    const commit = (sim: Simulation) => {
+      this.nextId = sim.nextId; this.enemies = sim.enemies;
+      this.groundItems = sim.groundItems; this.groundGold = sim.groundGold; this.pickups = sim.pickups;
+      for (const id of sim.brokenContainers) this.brokenContainers.add(id);
+    };
+    for (const { sim, input } of members) {
+      share(sim);
+      const p = sim.player;
+      p.prevX = p.x; p.prevY = p.y;
+      for (const shot of sim.projectiles) { shot.prevX = shot.x; shot.prevY = shot.y; }
+      if (!p.dead) {
+        p.hitFlash = Math.max(0, p.hitFlash - dt);
+        sim.queueInput(input);
+        sim.updatePlayer(dt, sim.groundPickup.input(p, sim.groundItems, sim.world, sim.time, dt, input));
+        metric(p.chronicle, 'time', dt);
+        sim.eventChannel.advance(dt,p,input);
+        sim.portal.advance(dt,p,input);
+        if(p.character.blessing&&!sim.world.isSanctuary?.(p.x,p.y)){
+          p.character.blessing.remaining=Math.max(0,p.character.blessing.remaining-dt);
+          if(!p.character.blessing.remaining){delete p.character.blessing;refreshCharacter(p);}
+        }
+      }
+      sim.updateProjectiles(dt);
+      advanceChains(sim.chains, dt, {
+        player: p, enemies: sim.enemies,
+        onScreen: enemy => enemyInCombatViewport(enemy, sim.combatViewport),
+        visible: (ax, ay, bx, by) => sim.lineOfSight(ax, ay, bx, by),
+        damage: (enemy, amount, angle, melee, style, elementalDamage, offense) => sim.damageEnemy(enemy, amount, angle, melee, false, style, elementalDamage, offense),
+        emit: event => sim.emit(event),
+      });
+      sim.updateGroundEffects(dt);
+      if (!p.dead) {
+        sim.updatePickups(0);
+        sim.groundGold = advanceGold(sim.groundGold, p, sim.world, 0, event => sim.emit(event));
+        sim.collectSelectedGroundItem();
+      }
+      commit(sim);
     }
+    const party = members.map(member => member.sim);
+    const riftAfter=currentDungeon(this.expeditions)?.rift?.phase;
+    if(riftAfter!==riftBefore&&(riftAfter==='boss'||riftAfter==='complete'))for(const shot of this.projectiles)shot.life=0;
+    this.updateEnemies(dt, party);
+    this.updateProjectiles(dt, party);
+    // The shared pickup clocks and attraction must not accelerate with party size.
+    const living = party.filter(sim => !sim.player.dead);
+    this.pickups = this.pickups.flatMap(pickup => {
+      const nearest = living.reduce<Simulation | undefined>((best, sim) => !best ||
+        Math.hypot(sim.player.x-pickup.x,sim.player.y-pickup.y) < Math.hypot(best.player.x-pickup.x,best.player.y-pickup.y) ? sim : best, undefined);
+      if (!nearest) { pickup.life-=dt; return pickup.life>0?[pickup]:[]; }
+      nearest.pickups=[pickup]; nearest.updatePickups(dt); return nearest.pickups;
+    });
+    this.groundGold = this.groundGold.flatMap(pile => {
+      const nearest = living.reduce<Simulation | undefined>((best, sim) => !best ||
+        Math.hypot(sim.player.x-pile.x,sim.player.y-pile.y) < Math.hypot(best.player.x-pile.x,best.player.y-pile.y) ? sim : best, undefined);
+      return nearest ? advanceGold([pile], nearest.player, this.world, dt, event => nearest.emit(event)) : [pile];
+    });
+    for (const sim of party) if (!sim.player.dead) {
+      share(sim); sim.camps = this.camps;
+      if(this.dungeonFloor)updateDungeon(sim,sim.spawnExclusion,0,event=>sim.emit(event));
+      else sim.updateSpawns(dt);
+      commit(sim);
+    }
+    if(this.dungeonFloor&&living.length){
+      const run=currentDungeon(this.expeditions),event=this.dungeonFloor.events?.find(event=>run?.events?.[event.id]?.started&&!run.events[event.id].finished);
+      const anchor=event?living.reduce((a,b)=>Math.hypot(a.player.x-event.x,a.player.y-event.y)<Math.hypot(b.player.x-event.x,b.player.y-event.y)?a:b):living[0];
+      const previous=this.player;this.player=anchor.player;advanceDungeonEvents(this,dt,event=>this.emit(event));this.player=previous;
+    }
+    syncTrial(this.eventState,this.enemies);
+    this.eventTimer-=dt;
+    if(!this.dungeonFloor&&this.eventTimer<=0&&living.length){
+      this.eventTimer=.5;
+      const trial=this.eventState.trial,site=trial?this.eventState.sites[trial.siteId]:undefined;
+      const anchor=site?living.reduce((a,b)=>Math.hypot(a.player.x-site.x,a.player.y-site.y)<Math.hypot(b.player.x-site.x,b.player.y-site.y)?a:b):living[0];
+      advanceTrial({state:this.eventState,player:anchor.player,enemies:this.enemies,world:this.world,view:anchor.spawnExclusion,
+        spawn:(kind,x,y,rank,source)=>this.spawnEnemy(kind,x,y,rank,source)});
+    }
+    this.world.setBrokenContainers?.(this.brokenContainers);
+    this.enemies = this.enemies.filter(e => e.state !== 'dead' || e.stateTime < ENCOUNTER_RULES.corpseDuration);
+    if(!this.dungeonFloor)this.enemies = this.enemies.filter(enemy => !party.length || party.some(sim => !sim.spawnExclusion
+      || !shouldRetireRoamer(enemy,sim.player,sim.spawnExclusion,sim.roaming.heading)));
+    for (const sim of party) share(sim);
   }
 
   /** Useful for authored encounters and deterministic headless tests. */
@@ -737,6 +852,7 @@ export class Simulation {
   }
 
   private damageEnemy(enemy: Enemy, damage: number, angle: number, melee: boolean, periodic = false, style?: ProjectileStyle, elementalDamage?: number, offense?: HitSnapshot, authoredBurn = false): void {
+    if (!periodic && enemy.hp > 0) this.damageOwners.set(enemy, this);
     damageEnemy(enemy, damage, angle, melee, {
       time: this.time,
       player: this.player, enemies: this.enemies, random: () => this.random(),
@@ -750,13 +866,17 @@ export class Simulation {
           nextId: () => this.nextId++, emit: event => this.emit(event),
         });
         this.kills = reward.kills; this.killRecharge = reward.recharge;
+        for (const partner of this.rewardPartners) if (partner !== this && !partner.player.dead
+          && Math.hypot(partner.player.x-actor.x,partner.player.y-actor.y) <= 1200) {
+          awardEnemyExperience(actor,partner.player,event=>partner.emit(event));
+        }
       },
     }, periodic, style, elementalDamage, offense, authoredBurn);
   }
 
   private enemyNeighbors=new EnemyNeighbors();
   private riftTactics=new RiftTactics();
-  private updateEnemies(dt: number): void {
+  private updateEnemies(dt: number, party?: readonly Simulation[]): void {
     this.enemyNeighbors.rebuild(this.enemies);
     updateWarbands(this.enemies, this.player, this.world, dt);
     const p = this.player;
@@ -764,28 +884,42 @@ export class Simulation {
     const context: EnemyAIContext = {
       player: p, enemies: this.enemies, world: this.world, time: this.time,
       neighbors:(enemy,padding)=>this.enemyNeighbors.around(enemy,padding),
-      hurtDecoy:(id,amount)=>{hurtDecoy(p,id,amount);},
+      hurtDecoy:(id,amount)=>{hurtDecoy(context.player,id,amount);},
       trial: trial ? { campId: `event:${trial.id}`, x: trial.x, y: trial.y, radius: EVENT_RULES.trialRadius } : null,
       visible: (ax, ay, bx, by) => this.lineOfSight(ax, ay, bx, by),
       move: (actor, vx, vy, delta) => this.moveEnemy(actor, vx, vy, delta),
-      hurt: (amount, angle, actor, damageType) => this.takeDamage(amount, angle, actor.level, damageType, actor.kind),
+      hurt: (amount, angle, actor, damageType) => (this.partyTarget.get(actor) ?? this).takeDamage(amount, angle, actor.level, damageType, actor.kind),
       shoot: (actor, angle, definition, effects) => this.projectile(actor.x, actor.y, angle,
         definition, undefined, effects, actor.level, actor.kind),
       emit: event => this.emit(event),
     };
     this.riftTactics.tick(context,dt,currentDungeon(this.expeditions)?.rift?.phase==='hunt');
     for (const enemy of this.enemies) {
+      if (party) {
+        const living = party.filter(sim => !sim.player.dead);
+        const previous = this.partyTarget.get(enemy);
+        const committed = previous && living.includes(previous) && (enemy.state === 'windup' || enemy.state === 'attack');
+        const target = committed ? previous : living.reduce<Simulation | undefined>((best, sim) =>
+          !best || Math.hypot(sim.player.x - enemy.x, sim.player.y - enemy.y) < Math.hypot(best.player.x - enemy.x, best.player.y - enemy.y) ? sim : best, undefined);
+        if (target) { this.partyTarget.set(enemy, target); context.player = target.player; }
+      }
       this.updateKnockback(enemy, dt);
       this.enemyNeighbors.update(enemy);
       enemy.stateTime += dt;
       if (enemy.state === 'dead') continue;
       enemy.rallyTime=Math.max(0,(enemy.rallyTime??0)-dt);
       if (!advanceEnemyStatuses(enemy, dt,
-        (actor, amount) => this.damageEnemy(actor, amount, 0, false, true, 'fire'))) continue;
+        (actor, amount) => {
+          const owner = party ? this.damageOwners.get(actor) : undefined;
+          if (owner) {
+            owner.groundItems=this.groundItems;owner.groundGold=this.groundGold;owner.pickups=this.pickups;
+            owner.nextId = this.nextId; owner.damageEnemy(actor, amount, 0, false, true, 'fire'); this.nextId = owner.nextId;
+          } else this.damageEnemy(actor, amount, 0, false, true, 'fire');
+        })) continue;
       if(enemy.riftWarning)continue;
       if(isWildernessBoss(enemy.kind)) updateWildernessBoss(enemy,dt,context); else if(enemy.kind==='warden') updateWarden(enemy,dt,context); else updateEnemyAI(enemy, dt, context);
       this.enemyNeighbors.update(enemy);
-      if (p.dead) break;
+      if (p.dead && !party) break;
     }
     for (const enemy of this.enemies) {
       enemy.vx = (enemy.x - enemy.prevX) / dt;
@@ -878,8 +1012,9 @@ export class Simulation {
     } };
   }
 
-  private updateProjectiles(dt: number): void {
+  private updateProjectiles(dt: number, party?: readonly Simulation[]): void {
     advanceProjectiles(this.projectiles, dt, {
+      party: party?.map(sim => ({ player: sim.player, hurt: (amount, angle, level, type, kind) => sim.takeDamage(amount, angle, level, type, kind) })),
       containers: this.containerContext(),
       player: this.player, enemies: this.enemies, world: this.world,
       onScreen: enemy => enemyInCombatViewport(enemy, this.combatViewport),

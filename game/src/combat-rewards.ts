@@ -20,6 +20,15 @@ export interface KillRewardContext {
   nextId(): number; emit(event: CombatEvent): void;
 }
 
+/** Shared parties award experience per nearby character, but create loot only once. */
+export function awardEnemyExperience(enemy: Enemy, player: Player, emit: (event: CombatEvent) => void): void {
+  const reward = Math.max(1, Math.round(enemy.xpReward * xpLevelFactor(player.level, enemy.level) * player.derived.xpGainMultiplier));
+  const levels = awardCharacterExperience(player, reward);
+  emit({ type: 'experience', x: enemy.x, y: enemy.y, amount: reward });
+  if (levels) emit({ type: 'level', x: player.x, y: player.y,
+    level: player.level, skillPoints: levels, statPoints: levels * 5, color: '#c0acf0' });
+}
+
 /** Called once after the damage resolver commits an enemy's death. */
 export function awardKillRewards(enemy: Enemy, kills: number, recharge: number, context: KillRewardContext): { kills: number; recharge: number } {
   const { player } = context;
@@ -29,13 +38,9 @@ export function awardKillRewards(enemy: Enemy, kills: number, recharge: number, 
   if (!player.dead) metric(player.chronicle,'manaRecovery:kill',Math.min(manaCapacity(player)-player.mana,player.derived.manaOnKill));
   if (!player.dead) player.mana = Math.min(manaCapacity(player), player.mana + player.derived.manaOnKill);
   const goldMultiplier = player.derived.goldFindMultiplier * worldDifficulty(enemy.rewardDifficulty).gold;
-  const reward = Math.max(1, Math.round(enemy.xpReward * xpLevelFactor(player.level, enemy.level) * player.derived.xpGainMultiplier));
-  const levels = awardCharacterExperience(player, reward);
-  context.emit({ type: 'experience', x: enemy.x, y: enemy.y, amount: reward });
+  awardEnemyExperience(enemy,player,context.emit);
   const gold = context.suppressDrops || isBossKind(enemy.kind) ? 0 : Math.round(rollEnemyGold(enemy.lootSeed, enemy.level, enemy.rank) * (ENEMY_LOOT_YIELD[enemy.kind] ?? 1) * goldMultiplier);
   if (gold) dropGold(context.groundGold, { id: context.nextId(), x: enemy.x, y: enemy.y, amount: gold, age: 0 });
-  if (levels) context.emit({ type: 'level', x: player.x, y: player.y,
-    level: player.level, skillPoints: levels, statPoints: levels * 5, color: '#c0acf0' });
   for (const item of context.suppressDrops || isBossKind(enemy.kind) ? [] : rollEnemyLoot({ playerLevel: dropPlayerLevel, seed: enemy.lootSeed, level: enemy.level, rank: enemy.rank,
     biome: enemy.biome, kind: enemy.kind, difficulty:enemy.rewardDifficulty, encounter: enemy.bossPhases!==undefined||enemy.kind==='goblinChief'?'boss':undefined, firstKill: kills === 1 })) {
     const drop = { id: context.nextId(), x: enemy.x, y: enemy.y, item };
