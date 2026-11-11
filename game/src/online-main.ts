@@ -18,7 +18,7 @@ import { controls } from './control-preferences.ts';
 import { InventoryPanel } from './inventory-panel.ts';
 import { SkillTreePanel } from './skill-tree-panel.ts';
 import type { CharacterCommand } from './character-commands.ts';
-import type { Player, CombatEvent } from './model.ts';
+import type { Player, CombatEvent, Input } from './model.ts';
 import { hoveredGroundLoot } from './ground-loot-hover.ts';
 import { ServicePanel } from './service-panel.ts';
 import { buildingNPC, focusNPC } from './npcs.ts';
@@ -43,6 +43,24 @@ import { getMinimapRect, getMinimapChartRect, projectMapPoint } from './map-view
 import { portalMapMarkers, townPortalAnchor, withinPortalReach } from './travel.ts';
 import './world-map.css';
 import './dungeon.css';
+import { JourneyPanel } from './journey-panel.ts';
+import { onlineJourneyFacts } from './online-journeys.ts';
+import { pinnedJourney } from './journey-state.ts';
+import { publicJourneyMarker } from './journey-marker.ts';
+import { dungeonJourney } from './dungeon-journey.ts';
+import { GamepadInput, PAD } from './gamepad-input.ts';
+import { GamepadMenu } from './gamepad-menu.ts';
+import { OnlineInputBuffer } from './online-input.ts';
+import { TouchHUD } from './touch-hud.ts';
+import { bindTouchCanvas } from './touch-canvas.ts';
+import { basicAttackWeapon, deriveAttackStats } from './equipment.ts';
+import { skillWeapon } from './skill-content.ts';
+import { resolveSkill } from './skill-progression.ts';
+import { directionalAimProfile } from './ranged-aim.ts';
+import { skillTargetPoint } from './skill-target-point.ts';
+import { portalActionMode, portalDestinations } from './portal-destination.ts';
+import { presentationProfile, presentationViewport } from './presentation-viewport.ts';
+import { getHUDLayout, isHUDPoint } from './hud-layout.ts';
 
 installUITheme();
 const app=document.querySelector<HTMLElement>('#app')!;
@@ -119,7 +137,7 @@ class OnlineGame {
   private connected=false;
   private sending=false;
   private sequence=Date.now();
-  private panel:'inventory'|'skills'|'service'|'event'|'rift'|'expedition'|'map'|null=null;
+  private panel:'inventory'|'skills'|'service'|'event'|'rift'|'expedition'|'map'|'journeys'|'menu'|null=null;
   private inventory:InventoryPanel;
   private skills:SkillTreePanel;
   private service:ServicePanel;
@@ -129,19 +147,30 @@ class OnlineGame {
   private exploration:Exploration;
   private worldMap:WorldMap;
   private dungeonMap:DungeonMap;
+  private journeys:JourneyPanel;
+  private touch:TouchHUD;
+  private gamepad=new GamepadInput();
+  private gamepadMenu=new GamepadMenu();
+  private padInput=new OnlineInputBuffer();
+  private usingGamepad=false;
+  private padAngle:number|null=null;
+  private padDistance=180;
+  private touchPreview=false;
+  private presentation=presentationProfile({android:false,coarsePointer:matchMedia('(pointer: coarse)').matches});
   private companions:Player[]=[];
   private lastParty='';
+  private toastTimer?:ReturnType<typeof setTimeout>;
   private reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   constructor(ticket:RoomTicket){
     this.surface=new World(ticket.seed);this.world=this.surface;this.sim=new Simulation(this.world,{seed:ticket.seed,spawn:false});
     this.exploration=new Exploration(this.surface);
     app.innerHTML=`<div class="online-game"><canvas id="online-world" tabindex="0" aria-label="Evergrow Online"></canvas><canvas id="online-ui" aria-hidden="true"></canvas>
-      <nav class="online-bar" aria-label="Sala"><span id="online-connection" role="status">Conectando…</span><button id="online-copy">Copiar convite</button><button id="online-inventory">Inventário</button><button id="online-skills">Habilidades</button><button id="online-map">Mapa</button><button id="online-home">Portal</button><button id="online-exit" hidden>Sair da masmorra</button><button id="online-leave">Sair</button></nav>
-      <ul id="online-party" class="online-party" aria-label="Jogadores na sala"></ul>
+      <nav class="online-bar" aria-label="Sala"><span id="online-connection" role="status">Conectando…</span><button id="online-open-menu">Sala</button></nav>
+      <ul id="online-party" class="online-party" aria-label="Jogadores na sala" hidden></ul>
       <p id="online-toast" class="online-toast" role="status" hidden></p>
       <section id="online-death" class="online-death" hidden><h2>Você caiu</h2><p>Seus companheiros continuam na floresta.</p><button id="online-revive" class="online-primary">Voltar ao acampamento</button></section>
-      <div id="online-panels"></div></div>`;
+      <div id="online-panels"><section id="online-menu" class="online-menu" hidden aria-label="Menu da sala"><h2>Sala cooperativa</h2><p>O mundo continua enquanto você abre os menus.</p><button id="online-resume-game">Continuar</button><button id="online-copy">Copiar convite</button><button id="online-players" aria-expanded="false" aria-controls="online-party">Jogadores</button><button id="online-inventory">Inventário</button><button id="online-skills">Habilidades</button><button id="online-journeys">Atividades</button><button id="online-map">Mapa</button><button id="online-home">Portal</button><button id="online-exit" hidden>Sair da masmorra</button><button id="online-sound">Som ligado</button><button id="online-fullscreen">Tela cheia</button><button id="online-leave">Sair da sala</button></section></div></div>`;
     this.canvas=app.querySelector<HTMLCanvasElement>('#online-world')!;this.ui=app.querySelector<HTMLCanvasElement>('#online-ui')!;
     this.ctx=this.ui.getContext('2d')!;this.fx=new PostFX(this.canvas);
     const mount=app.querySelector<HTMLElement>('#online-panels')!,signal=this.abort.signal;
@@ -180,17 +209,58 @@ class OnlineGame {
     this.dungeonMap=new DungeonMap(mount,()=>this.closePanel(),()=>{
       this.dungeonMap.close();this.worldMap.open({x:this.sim.expeditions.surfaceX,y:this.sim.expeditions.surfaceY,angle:0});
     });
+    this.journeys=new JourneyPanel(mount,app.querySelector<HTMLElement>('.online-game')!,{
+      close:()=>this.closePanel(),open:id=>this.openJourneys(id),command:async command=>{
+        try{await this.client.post('command',{type:'journey',command});return true;}catch(error){this.toast((error as Error).message);return false;}
+      },map:id=>{
+        const goal=[this.sim.journeys.nearestTown,this.sim.journeys.townPin,...this.sim.journeys.accepted,...this.sim.journeys.offers,...this.sim.journeys.history].find(goal=>goal?.id===id);
+        if(!goal)return;const facts=onlineJourneyFacts(this.sim,this.surface,this.exploration);
+        this.closePanel();this.panel='map';this.worldMap.open({x:this.sim.expeditions.location?this.sim.expeditions.surfaceX:this.sim.player.x,y:this.sim.expeditions.location?this.sim.expeditions.surfaceY:this.sim.player.y,angle:0});
+        this.worldMap.focusJourney(publicJourneyMarker(goal,facts.discovered(goal.id)||goal.finishedAt!==undefined));
+      },
+    });
     this.client=new OnlineClient(ticket,snapshot=>this.snapshot(snapshot),(status,connected)=>{
       this.connected=connected;const label=app.querySelector<HTMLElement>('#online-connection');if(label){label.textContent=status;label.dataset.connected=String(connected);}
-      if(!connected)this.input.clear();
+      if(!connected)this.clearInput();
     });
+    this.touch=new TouchHUD(app.querySelector<HTMLElement>('.online-game')!,{
+      activate:active=>{
+        this.input.clear();this.padInput.clear();
+        if(active||!this.usingGamepad)this.gamepad.clear();
+        this.renderer.touchActive=active;if(active)this.usingGamepad=false;
+        if(this.touch)this.resize();
+      },
+      clearAttack:()=>this.command({type:'clearCombat'}),cancelCombat:()=>this.command({type:'clearCombat'}),
+      unlock:()=>{void this.audio.unlock().catch(()=>{});},notice:message=>this.toast(message),
+      menu:action=>{
+        if(action==='pause')this.openMenu();
+        else if(action==='character'||action==='inventory'){this.openPanel('inventory');this.inventory.openTouchTab(action==='character'?'stats':'bag');}
+        else if(action==='skills')this.openPanel('skills');
+        else if(action==='journeys')this.openJourneys();else if(action==='map')this.openMap();
+        else if(action==='portal')this.homePortal();else if(action==='interact')this.interact();
+      },
+    });
+    const menuButton=this.touch.element.querySelector<HTMLButtonElement>('[data-touch-menu="pause"]')!;
+    menuButton.setAttribute('aria-label','Menu da sala');menuButton.querySelector('.touch-icon')!.textContent='⋯';
+    bindTouchCanvas(this.canvas,signal,{
+      enabled:()=>this.touch.active&&!this.panel&&this.connected,pan:()=>{},
+      start:()=>this.command({type:'clearCombat'}),
+      zoom:scale=>this.renderer.zoomByWheel(-Math.log(scale)/.0016,0,this.canvas.getBoundingClientRect().height),
+      tap:point=>{const rect=this.canvas.getBoundingClientRect();this.interactAt(point.x*this.renderer.width/rect.width,point.y*this.renderer.height/rect.height);},
+    });
+    app.querySelector('#online-resume-game')!.addEventListener('click',()=>this.closePanel(),{signal});
+    app.querySelector('#online-open-menu')!.addEventListener('click',()=>this.openMenu(),{signal});
+    app.querySelector('#online-sound')!.addEventListener('click',()=>this.toggleSound(),{signal});
+    const fullscreen=app.querySelector<HTMLButtonElement>('#online-fullscreen')!;
+    fullscreen.hidden=!document.fullscreenEnabled;
+    fullscreen.addEventListener('click',()=>{void(document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()).catch(()=>this.toast('Tela cheia indisponível.'));},{signal});
     app.querySelector('#online-copy')!.addEventListener('click',()=>{
       const url=new URL('/online.html',location.origin);url.hash=new URLSearchParams({room:ticket.room,invite:ticket.invite}).toString();
       const copy=navigator.clipboard?.writeText(url.href)??Promise.reject(new Error('Clipboard unavailable'));
       void copy.then(()=>this.toast('Convite copiado.'),()=>{
         this.toast('Copie o convite abaixo.');const field=document.createElement('input');field.className='online-invite-field';field.value=url.href;field.readOnly=true;
         app.querySelector('.online-invite-field')?.remove();
-        app.querySelector('.online-bar')!.append(field);field.focus();field.select();
+        app.querySelector('#online-menu')!.append(field);field.focus();field.select();
       });
     },{signal});
     app.querySelector('#online-leave')!.addEventListener('click',()=>{
@@ -199,51 +269,91 @@ class OnlineGame {
     app.querySelector('#online-inventory')!.addEventListener('click',()=>this.openPanel('inventory'),{signal});
     app.querySelector('#online-skills')!.addEventListener('click',()=>this.openPanel('skills'),{signal});
     app.querySelector('#online-map')!.addEventListener('click',()=>this.openMap(),{signal});
+    app.querySelector('#online-journeys')!.addEventListener('click',()=>this.openJourneys(),{signal});
+    app.querySelector('#online-players')!.addEventListener('click',()=>{
+      this.closePanel();
+      const list=app.querySelector<HTMLElement>('#online-party')!;list.hidden=!list.hidden;
+      app.querySelector('#online-players')!.setAttribute('aria-expanded',String(!list.hidden));
+    },{signal});
     app.querySelector('#online-home')!.addEventListener('click',()=>this.homePortal(),{signal});
     app.querySelector('#online-exit')!.addEventListener('click',()=>this.command({type:'dungeon',kind:'exit'}),{signal});
     app.querySelector('#online-revive')!.addEventListener('click',()=>this.command({type:'revive'}),{signal});
     this.canvas.addEventListener('contextmenu',event=>event.preventDefault(),{signal});
-    this.canvas.addEventListener('pointermove',event=>this.input.movePointer(event.clientX,event.clientY,this.canvas.getBoundingClientRect(),this.renderer.width,this.renderer.height),{signal});
-    this.canvas.addEventListener('pointerdown',event=>{
-      this.canvas.focus();void this.audio.unlock();
+    window.addEventListener('pointermove',event=>{
+      if(event.pointerType==='touch')return;
       this.input.movePointer(event.clientX,event.clientY,this.canvas.getBoundingClientRect(),this.renderer.width,this.renderer.height);
-      const map=getMinimapRect(this.renderer.width,this.renderer.height),pointer=this.input.pointer;
-      if(event.button===0&&pointer.x>=map.x&&pointer.y>=map.y&&pointer.x<map.x+map.width&&pointer.y<map.y+map.height){this.openMap();return;}
-      const loot=hoveredGroundLoot(this.renderer.groundLootLabels,this.input.pointer.x,this.input.pointer.y);
-      if(event.button===0&&loot){this.command({type:'pickup',id:loot.id});return;}
-      if(event.button===0&&this.openService(this.renderer.screenToWorld(this.input.pointer.x,this.input.pointer.y)))return;
-      if(event.button===0&&this.openEvent(this.renderer.screenToWorld(this.input.pointer.x,this.input.pointer.y)))return;
+      if(this.input.setPointerUIBlocked(document.elementFromPoint(event.clientX,event.clientY)!==this.canvas))this.command({type:'clearCombat'});
+      if(event.isTrusted){this.usingGamepad=false;this.padInput.clear();}
+    },{signal});
+    this.canvas.addEventListener('pointerdown',event=>{
+      if(event.pointerType==='touch'||this.panel)return;
+      this.canvas.focus();void this.audio.unlock();
+      this.usingGamepad=false;this.padInput.clear();
+      this.input.movePointer(event.clientX,event.clientY,this.canvas.getBoundingClientRect(),this.renderer.width,this.renderer.height);
+      if(event.button===0&&this.interactAt(this.input.pointer.x,this.input.pointer.y))return;
       this.input.pointerDown(event.button);
     },{signal});
     window.addEventListener('pointerup',event=>this.input.pointerUp(event.button),{signal});
     window.addEventListener('keydown',event=>{
       if((event.target as HTMLElement)?.closest('input,textarea,select'))return;
-      if(event.code==='Escape'){this.closePanel();return;}
+      if(event.code==='Escape'){event.preventDefault();if(!event.repeat)this.panel?this.closePanel():this.openMenu();return;}
+      if(event.code==='KeyN'){if(!event.repeat)this.toggleSound();return;}
       if(event.code==='KeyI'||event.code==='KeyC'){event.preventDefault();if(!event.repeat)this.openPanel('inventory');return;}
       if(event.code==='KeyT'){event.preventDefault();if(!event.repeat)this.openPanel('skills');return;}
+      if(controls.action(event.code)==='journeys'){event.preventDefault();if(!event.repeat)this.openJourneys();return;}
       if(controls.action(event.code)==='map'){event.preventDefault();if(!event.repeat)this.openMap();return;}
       if(controls.action(event.code)==='portal'){event.preventDefault();if(!event.repeat)this.homePortal();return;}
       if(this.panel)return;
-      if(controls.action(event.code)==='interact'){event.preventDefault();if(!event.repeat&&!this.openService())this.openEvent();return;}
-      if(controls.action(event.code)){event.preventDefault();this.input.keyDown(event.code);}
+      if(controls.action(event.code)==='interact'){event.preventDefault();if(!event.repeat)this.interact();return;}
+      if(controls.action(event.code)){event.preventDefault();this.usingGamepad=false;this.padInput.clear();this.touch.setActive(false);this.input.keyDown(event.code);}
     },{signal});
     window.addEventListener('keyup',event=>this.input.keyUp(event.code),{signal});
-    window.addEventListener('blur',()=>this.input.clear(),{signal});
-    document.addEventListener('visibilitychange',()=>this.input.clear(),{signal});
+    window.addEventListener('blur',()=>this.clearInput(),{signal});
+    document.addEventListener('visibilitychange',()=>{this.clearInput();this.audio.setForeground(!document.hidden);},{signal});
     this.canvas.addEventListener('wheel',event=>{event.preventDefault();this.renderer.zoomByWheel(event.deltaY,event.deltaMode,innerHeight);},{signal,passive:false});
     window.addEventListener('resize',()=>this.resize(),{signal});
+    window.visualViewport?.addEventListener('resize',()=>this.resize(),{signal});
     this.resize();this.canvas.focus();this.client.connect();
     this.inputTimer=setInterval(()=>this.sendInput(),1000/30);
     this.frame=requestAnimationFrame(now=>this.render(now));
   }
   private toast(message:string):void {
     const toast=app.querySelector<HTMLElement>('#online-toast');if(toast){toast.textContent=message;toast.hidden=false;}
+    clearTimeout(this.toastTimer);this.toastTimer=setTimeout(()=>{if(toast)toast.hidden=true;},6000);
   }
   private command(value:unknown):void {
     if(!this.connected){this.toast('Aguarde a conexão com a sala.');return;}
     void this.client.post('command',value).catch(error=>this.toast((error as Error).message));
   }
-  private closePanel():void {this.inventory.close();this.skills.close();this.service.close();this.events.close();this.rifts.close();this.expeditions.close();this.worldMap.close();this.dungeonMap.close();this.panel=null;this.input.clear();this.canvas.focus();}
+  private clearInput():void{this.input.clear();this.gamepad.clear();this.padInput.clear();this.gamepadMenu.clear();this.touch?.clear();}
+  private closePanel():void {
+    this.inventory.close();this.skills.close();this.service.close();this.events.close();this.rifts.close();this.expeditions.close();this.worldMap.close();this.dungeonMap.close();this.journeys.close();
+    app.querySelector<HTMLElement>('#online-menu')!.hidden=true;this.panel=null;this.clearInput();this.canvas.focus();
+  }
+  private openMenu():void{const previous=this.panel;this.closePanel();if(previous==='menu')return;this.panel='menu';app.querySelector<HTMLElement>('#online-menu')!.hidden=false;}
+  private toggleSound():void{this.audio.setEnabled(!this.audio.enabled);app.querySelector('#online-sound')!.textContent=this.audio.enabled?'Som ligado':'Som desligado';}
+  private minimapRect(){const rect=getMinimapRect(this.renderer.width,this.renderer.height);return {...rect,y:this.touch?.active?this.touch.minimapTop*this.renderer.height/Math.max(1,visualViewport?.height??innerHeight):rect.y};}
+  private interactAt(x:number,y:number):boolean{
+    const map=this.minimapRect();
+    if(x>=map.x&&y>=map.y&&x<map.x+map.width&&y<map.y+map.height){this.openMap();return true;}
+    if(!this.touch.active&&isHUDPoint(x,y,this.renderer.width,this.renderer.height)){
+      const menu=getHUDLayout(this.renderer.width,this.renderer.height).shortcuts[0];
+      if(x>=menu.x&&y>=menu.y&&x<=menu.x+menu.width&&y<=menu.y+menu.height)this.openMenu();
+      return true;
+    }
+    const loot=hoveredGroundLoot(this.renderer.groundLootLabels,x,y);
+    if(loot){this.command({type:'pickup',id:loot.id});return true;}
+    const point=this.renderer.screenToWorld(x,y);return this.openService(point)||this.openEvent(point);
+  }
+  private interact():void{
+    if(this.openService()||this.openEvent())return;
+    const p=this.sim.player,item=this.sim.groundItems.filter(item=>Math.hypot(item.x-p.x,item.y-p.y)<120).sort((a,b)=>Math.hypot(a.x-p.x,a.y-p.y)-Math.hypot(b.x-p.x,b.y-p.y))[0];
+    if(item)this.command({type:'pickup',id:item.id});
+  }
+  private openJourneys(id?:string):void{
+    if(!this.lastSnapshot)return;const previous=this.panel;this.closePanel();if(previous==='journeys'&&!id)return;
+    this.panel='journeys';this.journeys.update(this.sim.journeys,onlineJourneyFacts(this.sim,this.surface,this.exploration),false,this.renderer.width,this.renderer.height,dungeonJourney(this.sim.expeditions,this.sim.dungeonFloor));this.journeys.open(id);
+  }
   private openMap():void{
     if(!this.lastSnapshot)return;
     const previous=this.panel;this.closePanel();if(previous==='map')return;this.panel='map';
@@ -253,7 +363,9 @@ class OnlineGame {
   }
   private homePortal():void{
     if(!this.lastSnapshot||this.sim.player.dead)return;
+    if(this.sim.portal.active){this.command({type:'portalCancel'});return;}
     this.closePanel();const link=this.sim.travel.returnTo;
+    if(link&&this.world===this.surface&&this.world.isSanctuary(this.sim.player.x,this.sim.player.y)&&!withinPortalReach(this.sim.player,this.surface.getPortalAnchor(link.town),this.world)){this.openMap();return;}
     this.command({type:link&&withinPortalReach(this.sim.player,this.surface.getPortalAnchor(link.town),this.world)?'portalReturn':'portalStart'});
   }
   private openEvent(pointer?:{x:number;y:number}):boolean {
@@ -300,12 +412,63 @@ class OnlineGame {
   }
   private sendInput():void {
     if(!this.connected||this.sending)return;
-    const aim=this.renderer.screenToWorld(this.input.pointer.x,this.input.pointer.y);
     const blocked=!!this.panel||document.hidden||!document.hasFocus();
-    const input=blocked?idleInput():this.input.consume(aim,false);
+    const input=blocked?idleInput():this.touch.active?this.directionInput():this.usingGamepad?this.padInput.consume():this.mouseInput();
     this.sending=true;this.sequence=Math.max(Date.now(),this.sequence+1);
     void this.client.post('input',{sequence:this.sequence,input,blocked,viewport:this.renderer.combatViewport,exclusion:this.renderer.spawnExclusionBounds(this.sim.player)})
       .catch(()=>{}).finally(()=>{this.sending=false;});
+  }
+  private mouseInput():Input{
+    const pointer=this.input.pointer,aim=this.renderer.screenToWorld(pointer.x,pointer.y);
+    const blocked=isHUDPoint(pointer.x,pointer.y,this.renderer.width,this.renderer.height);
+    const input=this.input.consume(aim,blocked),p=this.sim.player;
+    const id=input.skillSlot!==null?p.character.skillSlots[input.skillSlot]:null;
+    const weapon=id?skillWeapon(id,p.equipment)??basicAttackWeapon(p):basicAttackWeapon(p);
+    const assisted=this.renderer.resolvePointerAim(this.sim,this.world,pointer.x,pointer.y,pointer.present,weapon);
+    return assisted?{...input,rangedAim:{x:assisted.x,y:assisted.y}}:input;
+  }
+  private directionInput():Input{
+    const p=this.sim.player,touch=this.touch.input,pad=this.gamepad;
+    if(!this.touch.active){
+      if(pad.aim.x||pad.aim.y){this.padAngle=Math.atan2(pad.aim.y,pad.aim.x);this.padDistance=60+Math.hypot(pad.aim.x,pad.aim.y)*220;}
+      else if(pad.move.x||pad.move.y)this.padAngle=Math.atan2(pad.move.y,pad.move.x);
+    }
+    const angle=this.padAngle??p.angle,raw={x:p.x+Math.cos(angle)*this.padDistance,y:p.y+Math.sin(angle)*this.padDistance};
+    const input=this.touch.active?touch.consume(raw):pad.gameplay(raw);
+    const slot=this.touch.active?touch.aimingSlot??input.skillSlot:input.skillSlot,id=slot!==null?p.character.skillSlots[slot]:null;
+    const weapon=id?skillWeapon(id,p.equipment)??basicAttackWeapon(p):basicAttackWeapon(p),range=deriveAttackStats(p.stats,weapon).range;
+    const recipe=id?resolveSkill(id,p.derived,p.character).recipe:null;
+    let aim=this.touch.active?{x:p.x+touch.aim.x*Math.min(900,range)*touch.distance,y:p.y+touch.aim.y*Math.min(900,range)*touch.distance}:raw;
+    if(recipe?.kind==='ground')aim=skillTargetPoint(this.world,p,aim,range);
+    const assisted=this.renderer.resolveDirectionAim(this.sim,this.world,aim,directionalAimProfile(range,weapon.attackKind,recipe));
+    if(assisted)aim=assisted;
+    const screen=this.renderer.worldToScreen(aim.x,aim.y);Object.assign(this.input.pointer,screen,{present:true});
+    return {...input,aimX:aim.x,aimY:aim.y,...(assisted?{rangedAim:{x:assisted.x,y:assisted.y}}:{})};
+  }
+  private pollGamepad(now:number):void{
+    let pads:(Gamepad|null)[]=[];try{pads=navigator.getGamepads?[...navigator.getGamepads()]:[];}catch{/* Host can deny this API. */}
+    const pad=this.gamepad;pad.poll(pads,this.connected&&document.hasFocus()&&!document.hidden);
+    if(pad.disconnected&&this.usingGamepad){this.clearInput();this.usingGamepad=false;this.toast('Controle desconectado.');return;}
+    if(pad.active&&!this.usingGamepad){this.input.clear();this.usingGamepad=true;this.touch.setActive(false);this.usingGamepad=true;this.padAngle=this.sim.player.angle;}
+    if(pad.pressed.size)void this.audio.unlock().catch(()=>{});
+    if(pad.pressed.has(PAD.pause)||(this.panel&&pad.pressed.has(PAD.dodge))){
+      if(this.panel==='inventory'&&this.inventory.dismissPopup())return;
+      if(this.panel==='skills'&&this.skills.dismissPopup())return;
+      this.panel?this.closePanel():this.openMenu();return;
+    }
+    if(this.sim.player.dead){this.gamepadMenu.update(app.querySelector<HTMLElement>('#online-death')!,pad,now);return;}
+    if(this.panel){
+      if(this.panel==='inventory')this.inventory.updateGamepad(pad,now);
+      else if(this.panel==='skills')this.skills.updateGamepad(pad,now);
+      else this.gamepadMenu.update(app.querySelector<HTMLElement>('#online-panels')!,pad,now);
+      return;
+    }
+    if(pad.pressed.has(PAD.map)){this.openMap();return;}
+    if(pad.pressed.has(PAD.up)){this.openPanel('skills');return;}
+    if(pad.pressed.has(PAD.left)||pad.pressed.has(PAD.right)){this.openPanel('inventory');return;}
+    if(pad.pressed.has(PAD.down)){this.homePortal();return;}
+    if(pad.pressed.has(PAD.interact)){this.interact();if(this.panel)return;}
+    if(this.usingGamepad)this.padInput.push(this.directionInput());
   }
   private snapshot(snapshot:OnlineSnapshot):void {
     if(snapshot.version!==ONLINE_VERSION){this.toast('Atualize a página para usar a versão atual.');this.client.dispose();return;}
@@ -320,6 +483,7 @@ class OnlineGame {
       this.sim.world=this.world;this.renderer.reset();if(previous!==this.surface)previous.dispose();
     }
     this.sim.expeditions=snapshot.expeditions;
+    if(snapshot.journeys)this.sim.journeys=snapshot.journeys;
     this.sim.clearedCampProjection=new Set(snapshot.clearedCamps);
     if(snapshot.chart&&this.exploration.restore(snapshot.chart))this.exploration.storageStatus='saved';
     // Retain the previous delivered positions, rather than a 120 Hz position that
@@ -356,22 +520,41 @@ class OnlineGame {
     app.querySelector<HTMLElement>('#online-exit')!.hidden=!snapshot.location;
     if(this.sim.player.dead&&this.panel)this.closePanel();
     if(this.panel==='inventory')this.inventory.refresh(this.sim.player);if(this.panel==='skills')this.skills.refresh(this.sim.player);
+    const facts=onlineJourneyFacts(this.sim,this.surface,this.exploration),goal=pinnedJourney(this.sim.journeys);
+    const marker=goal?publicJourneyMarker(goal,goal.finishedAt!==undefined||facts.discovered(goal.id)):null;
+    this.worldMap.setJourneyMarker(marker);this.dungeonMap.marker=dungeonJourney(this.sim.expeditions,this.sim.dungeonFloor)?.marker??null;
+    this.journeys.update(this.sim.journeys,facts,!this.panel,this.renderer.width,this.renderer.height,dungeonJourney(this.sim.expeditions,this.sim.dungeonFloor));
     this.receivedAt=performance.now();this.lastSnapshot=snapshot;
   }
   private resize():void {
-    const density=Math.min(1.5,devicePixelRatio||1),width=Math.max(1,Math.round(innerWidth*density)),height=Math.max(1,Math.round(innerHeight*density));
-    this.canvas.width=this.ui.width=width;this.canvas.height=this.ui.height=height;this.renderer.resize(width,height);
-    this.renderer.cursorPixelScale={x:density,y:density};
+    const viewport=presentationViewport({width:innerWidth,height:innerHeight,visualHeight:visualViewport?.height??innerHeight,devicePixelRatio:devicePixelRatio||1,touchActive:!!this.touch?.active,profile:this.presentation});
+    this.canvas.width=viewport.worldBufferWidth;this.canvas.height=viewport.worldBufferHeight;
+    this.ui.width=viewport.uiBufferWidth;this.ui.height=viewport.uiBufferHeight;this.renderer.resize(viewport.logicalWidth,viewport.logicalHeight);
+    this.renderer.cursorPixelScale={x:viewport.logicalWidth/viewport.width,y:viewport.logicalHeight/viewport.height};
+    this.touch?.refreshLayout();this.renderer.touchViewport=this.touch?.viewport??null;
+    this.renderer.touchTopInset=(this.touch?.safeTop??0)*viewport.logicalHeight/viewport.height;
+    this.journeys.resize(viewport.logicalWidth,viewport.logicalHeight);
   }
   private render(now:number):void {
     const dt=Math.min(.1,(now-this.previous)/1000);this.previous=now;
+    this.pollGamepad(now);
     if(this.lastSnapshot){
+      this.touch.update(this.sim.player,this.panel?'paused':'playing',!this.connected,now,this.sim.groundEffects);
+      const preview=!!this.touch.input.preview;if(preview&&!this.touchPreview)this.command({type:'clearCombat'});this.touchPreview=preview;
+      this.renderer.gamepadActive=this.usingGamepad;
+      const destinations=portalDestinations({seed:this.surface.seed,home:this.surface.getPortalAnchor(this.sim.travel.homeTown),travel:this.sim.travel,expeditions:this.sim.expeditions});
+      this.renderer.portalDestinations=destinations;
+      const link=this.sim.travel.returnTo,returnReach=!!link&&this.world===this.surface&&withinPortalReach(this.sim.player,this.surface.getPortalAnchor(link.town),this.world);
+      const mode=portalActionMode(this.sim.portal.active,this.world.isSanctuary(this.sim.player.x,this.sim.player.y),!!destinations.returnTo,returnReach);
+      this.touch.setPortal({mode,progress:this.sim.portal.active?this.sim.portal.progress:null,destination:(mode==='locate'||mode==='return'?destinations.returnTo:null)??destinations.home});
       const alpha=Math.min(1,(now-this.receivedAt)/(1000/15));
       const settings:RenderSettings={phase:'playing',reducedMotion:this.reducedMotion,companions:this.companions,interpolationAlpha:alpha,showGroundLootNames:true};
       this.renderer.pointerX=this.input.pointer.x;this.renderer.pointerY=this.input.pointer.y;this.renderer.pointerActive=this.input.pointer.present&&!this.panel;
       this.renderer.render(this.sim,this.world,dt,settings);this.fx.render(this.renderer.canvas,this.renderer.hurt,this.renderer.emission);
-      this.ctx.clearRect(0,0,this.ui.width,this.ui.height);this.renderer.renderUI(this.ctx,this.sim,this.world,settings);
+      this.ctx.setTransform(1,0,0,1,0,0);this.ctx.clearRect(0,0,this.ui.width,this.ui.height);
+      this.ctx.setTransform(this.ui.width/this.renderer.width,0,0,this.ui.height/this.renderer.height,0,0);this.renderer.renderUI(this.ctx,this.sim,this.world,settings);
       const run=currentDungeon(this.sim.expeditions);if(run?.rift)drawRiftHUD(this.ctx,run,this.renderer.width);
+      this.ctx.save();this.ctx.translate(0,this.minimapRect().y-getMinimapRect(this.renderer.width,this.renderer.height).y);
       if(run&&this.sim.dungeonFloor){
         drawCryptMinimap(this.ctx,this.sim.dungeonFloor,run,this.sim.player,this.renderer.width,this.renderer.height,null,this.sim.time,this.sim.enemies);
         if(this.panel==='map')this.dungeonMap.update(this.sim.player,this.sim.enemies,run);
@@ -385,6 +568,7 @@ class OnlineGame {
           this.ctx.fillStyle=companion.dead?'#bd8277':'#98dbc5';this.ctx.beginPath();this.ctx.arc(point.x,point.y,3,0,Math.PI*2);this.ctx.fill();
         }
       }
+      this.ctx.restore();
       for(const companion of this.companions){
         const x=companion.prevX+(companion.x-companion.prevX)*alpha,y=companion.prevY+(companion.y-companion.prevY)*alpha;
         const point=this.renderer.worldToScreen(x,y-70);text(this.ctx,companion.name??'Viajante',point.x,point.y,.8,'#b9dfcc','center');
@@ -393,8 +577,8 @@ class OnlineGame {
     this.frame=requestAnimationFrame(stamp=>this.render(stamp));
   }
   dispose():void {
-    this.abort.abort();this.client.dispose();clearInterval(this.inputTimer);cancelAnimationFrame(this.frame);
-    this.inventory.dispose();this.skills.dispose();this.service.dispose();this.events.dispose();this.rifts.dispose();this.expeditions.dispose();this.worldMap.dispose();this.dungeonMap.dispose();this.exploration.dispose();this.renderer.reset();this.fx.dispose();this.audio.dispose();this.world.dispose();if(this.world!==this.surface)this.surface.dispose();
+    this.abort.abort();this.client.dispose();clearInterval(this.inputTimer);clearTimeout(this.toastTimer);cancelAnimationFrame(this.frame);
+    this.touch.dispose();this.inventory.dispose();this.skills.dispose();this.service.dispose();this.events.dispose();this.rifts.dispose();this.expeditions.dispose();this.worldMap.dispose();this.dungeonMap.dispose();this.journeys.dispose();this.exploration.dispose();this.renderer.reset();this.fx.dispose();this.audio.dispose();this.world.dispose();if(this.world!==this.surface)this.surface.dispose();
   }
 }
 

@@ -7,7 +7,7 @@ npm run setup
 npm run online:dev
 ```
 
-Abra [Evergrow Online local](http://127.0.0.1:5173/online.html), crie uma sala e use **Copiar convite**. Para jogar pela internet, todos precisam acessar a mesma instalação HTTPS do servidor. [Execução, hospedagem e funcionamento das salas](docs/multiplayer.md).
+Abra [Evergrow Online local](http://127.0.0.1:5173/online.html), crie uma sala e use **Sala → Copiar convite**. O cooperativo inclui mundo, eventos, masmorras, Expedições, Rifts, atividades individuais e controles de teclado, toque e gamepad. Para jogar pela internet, todos precisam acessar a mesma instalação HTTPS do servidor. [Execução, hospedagem e funcionamento das salas](docs/multiplayer.md).
 
 O modo solo original continua disponível em `/index.html`. O texto abaixo descreve o projeto original e inclui recursos que ainda pertencem ao modo solo.
 

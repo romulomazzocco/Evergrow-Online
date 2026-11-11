@@ -7,6 +7,7 @@ import type { EventState, EventSite, EventChoice } from './poi-content.ts';
 import type { Expeditions } from './dungeon-state.ts';
 import type { DungeonEntrance } from './dungeon.ts';
 import type { TravelState } from './travel.ts';
+import type { JourneyState } from './journey-state.ts';
 
 export const ONLINE_VERSION = 1;
 export const ONLINE_LIMITS = { players: 4, rooms: 32, inputAge: 600, reconnect: 120_000, body: 256*1024, snapshot:16*1024*1024 } as const;
@@ -23,6 +24,7 @@ export interface OnlineSnapshot {
   expeditions: Expeditions;
   chart?: string;
   clearedCamps:string[];
+  journeys?:JourneyState;
 }
 export function encodeOnline(value: unknown): string {
   return JSON.stringify(value, (_key, v: unknown) => v instanceof Set ? { $set: [...v] } : v);
@@ -44,7 +46,10 @@ export function validInput(value: unknown): Input | null {
     || v.skillSlot !== null && (!Number.isInteger(v.skillSlot) || Number(v.skillSlot) < 0 || Number(v.skillSlot) > 4)) return null;
   if (v.heldSkillSlots !== undefined && (!Array.isArray(v.heldSkillSlots) || v.heldSkillSlots.length > 5
     || !v.heldSkillSlots.every(slot => Number.isInteger(slot) && slot >= 0 && slot <= 4))) return null;
+  const ranged=object(v.rangedAim);
+  if(v.rangedAim!==undefined&&(!ranged||!['x','y'].every(key=>typeof ranged[key]==='number'&&Number.isFinite(ranged[key])&&Math.abs(Number(ranged[key]))<=1e7)))return null;
   return { moveX: Number(v.moveX), moveY: Number(v.moveY), aimX: Number(v.aimX), aimY: Number(v.aimY),
     attack: v.attack === true, dodge: v.dodge === true, heal: v.heal === true, skillSlot: v.skillSlot as number | null,
-    ...(Array.isArray(v.heldSkillSlots) ? { heldSkillSlots: v.heldSkillSlots as number[] } : {}), skillPressed: v.skillPressed !== false };
+    ...(Array.isArray(v.heldSkillSlots) ? { heldSkillSlots: v.heldSkillSlots as number[] } : {}), skillPressed: v.skillPressed !== false,
+    ...(ranged?{rangedAim:{x:Number(ranged.x),y:Number(ranged.y)}}:{}) };
 }

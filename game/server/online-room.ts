@@ -27,6 +27,9 @@ import { startDungeonEvent } from '../src/dungeon-events.ts';
 import { Exploration } from '../src/exploration.ts';
 import { executeMapTravel, executePortalTravel, activatePortalAnchor } from '../src/travel-command.ts';
 import { townPortalAnchor, withinPortalReach, portalDepartureProblem } from '../src/travel.ts';
+import { OnlineJourneyScheduler, onlineJourneyFacts } from '../src/online-journeys.ts';
+import { executeJourneyCommand } from '../src/journey-command.ts';
+import type { JourneyCommand } from '../src/journey-state.ts';
 import { idleInput, ONLINE_LIMITS, ONLINE_VERSION, object, type OnlineSnapshot, type RoomTicket } from '../src/online-protocol.ts';
 import type { Input } from '../src/model.ts';
 import type { CharacterCheckpoint } from '../src/character-save.ts';
@@ -39,6 +42,7 @@ export interface OnlineMember {
   id: string; token: string; sim: Simulation; input: Input; sequence: number; inputAt: number; seenAt: number; connected: boolean;
   viewport?: CombatViewport; exclusion?: CombatViewport;
   chartSent?:number;
+  journeys?:OnlineJourneyScheduler;
 }
 export interface SavedRoom {
   version: 1; id: string; invite: string; seed: number; tick: number; savedAt: number;
@@ -96,8 +100,11 @@ export class OnlineRoom {
   input(member: OnlineMember, input: Input, sequence: number, now = Date.now()): boolean {
     if (!Number.isSafeInteger(sequence) || sequence <= member.sequence) return false;
     // Preserve action edges if two packets arrive before the next simulation tick.
+    const pending=member.input.skillSlot!==null&&member.input.skillPressed!==false;
+    const pressed=input.skillSlot!==null&&input.skillPressed!==false;
     member.input = { ...input, dodge: input.dodge || member.input.dodge, heal: input.heal || member.input.heal,
-      skillSlot: input.skillSlot ?? member.input.skillSlot };
+      skillSlot: pressed?input.skillSlot:pending?member.input.skillSlot:input.skillSlot,
+      skillPressed:pressed||pending };
     member.sequence = sequence; member.inputAt = member.seenAt = now;
     return true;
   }
@@ -131,6 +138,9 @@ export class OnlineRoom {
       if (now-member.inputAt > ONLINE_LIMITS.inputAge) { member.input = idleInput(); member.sim.clearInput(); }
     }
     this.sim.updateCooperative(active.map(member => ({ sim: member.sim, input: member.input })));
+    for(const member of active){
+      member.journeys??=new OnlineJourneyScheduler(member.sim,this.surface,this.exploration);member.journeys.update();
+    }
     this.tick++;
     for (const member of active) {
       const input = member.input;
@@ -217,9 +227,16 @@ export class OnlineRoom {
         sim.clearInput();member.input=idleInput();this.nextEventAt=0;
         const message=sim.portal.start(sim.player,sim.world);return {ok:!message,...(message?{message}:{})};
       }
+      if(v.type==='portalCancel'){sim.portal.cancel();return {ok:true};}
       if(v.type==='claimReady'&&sim.portal.ready&&sim.dungeonFloor)Object.assign(v,{type:'dungeon',kind:'town'});
       if(v.type==='portalReturn'&&sim.travel.returnTo?.dungeon)Object.assign(v,{type:'dungeon',kind:'return'});
-      if(v.type==='mapTravel'&&typeof v.id==='string'&&v.id.length<=120){
+      if(v.type==='journey'){
+        const command=object(v.command),id=(value:unknown)=>typeof value==='string'&&value.length>0&&value.length<=120;
+        if(!command||!(command.type==='collapse'&&typeof command.value==='boolean'
+          ||command.type==='acceptAll'&&Array.isArray(command.ids)&&command.ids.length<=2000&&command.ids.every(id)
+          ||['accept','track','untrack','dismiss'].includes(String(command.type))&&id(command.id)))return {ok:false,message:'Atividade inválida.'};
+        result=await executeJourneyCommand(sim,command as unknown as JourneyCommand,persist,onlineJourneyFacts(sim,this.surface,this.exploration));
+      }else if(v.type==='mapTravel'&&typeof v.id==='string'&&v.id.length<=120){
         result=await executeMapTravel(sim,this.exploration,v.id,persist,!staying);
       }else if(v.type==='setHome'){
         const p=sim.player,anchor=this.surface.getSettlements(p.x-200,p.y-200,400,400).map(townPortalAnchor).find(anchor=>withinPortalReach(p,anchor,sim.world));
@@ -308,6 +325,9 @@ export class OnlineRoom {
     if(this.busy)return {ok:false,message:'Aguarde a ação em andamento.'};
     const v = object(value), sim = member.sim;
     if (!v || typeof v.type !== 'string') return { ok: false, message: 'Comando inválido.' };
+    if(v.type==='clearCombat'){
+      sim.clearCombatInput();member.input={...member.input,attack:false,skillSlot:null,heldSkillSlots:[]};return {ok:true};
+    }
     if (v.type === 'revive') {
       if (!sim.player.dead) return { ok: false };
       // Revive resets only this player's runtime. Shared enemies/loot stay owned by the room.

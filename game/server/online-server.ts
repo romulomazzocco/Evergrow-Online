@@ -120,7 +120,7 @@ export async function createOnlineServer(options: Options = {}) {
       }
       if (action === 'command' && req.method === 'POST') {
         const value=await body(req);
-        const result=['event','dungeon','dungeonEvent','mapTravel','portalStart','portalReturn','setHome'].includes(String(value.type))?await room.worldCommand(member,value):room.command(member,value);
+        const result=['event','dungeon','dungeonEvent','mapTravel','portalStart','portalCancel','portalReturn','setHome','journey'].includes(String(value.type))?await room.worldCommand(member,value):room.command(member,value);
         json(res,result.ok?200:400,result); return;
       }
       if (action === 'leave' && req.method === 'POST') {
@@ -152,7 +152,7 @@ export async function createOnlineServer(options: Options = {}) {
         if (stream.writableLength > 64_000) continue;
         const chart=member.chartSent!==room.exploration.revision?room.chart():undefined;
         member.chartSent=room.exploration.revision;
-        stream.write('data: '+encodeOnline({ ...frame,self:member.id,...(chart?{chart}:{}) })+'\n\n');
+        stream.write('data: '+encodeOnline({ ...frame,self:member.id,journeys:member.sim.journeys,...(chart?{chart}:{}) })+'\n\n');
       }
     }
   }, 8);

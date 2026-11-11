@@ -9,13 +9,17 @@ npm run setup
 npm run online:dev
 ```
 
-O comando inicia o servidor de salas em `127.0.0.1:3001` e o Vite em `127.0.0.1:5173`. Abra `http://127.0.0.1:5173/online.html`, escolha um nome e equipamento e crie uma sala. O botão **Copiar convite** copia o endereço com a sala e sua chave de entrada. Outros jogadores escolhem seus próprios personagens pelo convite. Há quatro vagas por sala.
+O comando inicia o servidor de salas em `127.0.0.1:3001` e o Vite em `127.0.0.1:5173`. Abra `http://127.0.0.1:5173/online.html`, escolha um nome e equipamento e crie uma sala. No menu **Sala**, **Copiar convite** copia o endereço com a sala e sua chave de entrada. Outros jogadores escolhem seus próprios personagens pelo convite. Há quatro vagas por sala.
 
 O servidor precisa continuar executando. Abrir duas cópias estáticas do jogo em hosts diferentes não conecta os jogadores. Um endereço `127.0.0.1` só funciona no próprio computador; para amigos em outros computadores use um servidor acessível a todos.
 
 ## Controles
 
-WASD move, o mouse mira e o botão esquerdo ataca. Espaço esquiva e Q usa poção. I ou C abre o inventário, T abre as habilidades, M abre o mapa e P abre o portal da cidade. Clique no nome de um item no chão para recolhê-lo. Escape fecha as janelas. Os menus deixam a partida em andamento, então use o acampamento para organizar o personagem.
+WASD move, o mouse mira e o botão esquerdo ataca. Espaço esquiva e Q usa poção. I ou C abre o inventário, T abre as habilidades, J abre as atividades, M abre o mapa e P abre o portal da cidade. Clique no nome de um item no chão para recolhê-lo. Escape fecha as janelas ou abre o menu da sala, com som e tela cheia quando disponível. N alterna o som. Os menus deixam a partida em andamento, então use o acampamento para organizar o personagem.
+
+Controles de toque usam os analógicos virtuais e botões originais. Toque em um comerciante, objetivo ou item para interagir; toque no minimapa para abrir o mapa. Arraste os controles de habilidade para mirar e solte para ativar. A pinça ajusta o zoom. O menu com reticências abre as opções locais da sala.
+
+Um gamepad com mapeamento padrão usa o analógico esquerdo para mover, o direito para mirar, RT para atacar, B para esquivar e LB para poção. LT/RB/X/Y/RS acionam os cinco espaços de habilidade. A interage ou recolhe o item mais próximo. View abre o mapa; o direcional abre inventário, habilidades ou portal; Start abre o menu. Nas janelas, B retorna, A confirma e os controles originais permitem navegar. Abrir uma janela, perder foco ou desconectar o controle limpa os comandos daquele jogador.
 
 Cada jogador escolhe entre os seis equipamentos iniciais. O inventário, as escolhas de atributos e a árvore de habilidades usam as regras originais. Inimigos podem atacar qualquer jogador próximo. Os aliados não causam dano entre si. Uma morte de inimigo cria um único conjunto de itens e moedas; os personagens vivos a até 1.200 unidades recebem experiência individualmente. Itens e moedas pertencem ao primeiro jogador que os recolhe.
 
@@ -86,7 +90,9 @@ O mapa da superfície é compartilhado e salvo no servidor. O minimapa mostra os
 
 O portal pessoal exige três segundos parado e preserva um ponto de retorno. Na superfície ele move apenas seu dono; quem ficar em um evento continua enfrentando seus guardiões. Marcos de cidade permitem definir um novo lar. Uma viagem entre masmorra e superfície leva a sala inteira e exige que os jogadores vivos se reúnam. O retorno, os recursos pessoais e o estado dos dois cenários são salvos antes da transição.
 
-As telas e o combate usam o código original. O suporte touch e os adaptadores de controle de console para o cooperativo ainda estão em integração; o modo solo mantém seus controles anteriores.
+As atividades são geradas no servidor e cada personagem mantém sua própria lista e objetivo acompanhado. Aceitar, acompanhar ou ocultar uma atividade é salvo antes de aplicar a mudança. Conclusões leem os registros compartilhados de eventos, acampamentos e masmorras. Chegadas a cidades e destinos de exploração pertencem a cada personagem e concedem a recompensa apenas uma vez. O mapa e o diário usam os mesmos marcadores.
+
+As telas, os controles de teclado, toque e gamepad e o combate reutilizam o código original. O HUD e os textos são desenhados na resolução nativa da tela depois dos efeitos do mundo. A sensação de combate, o balanceamento e a disposição dos controles aguardam o teste manual do usuário; os testes automáticos são de código e de transporte HTTP.
 
 As salas são privadas por convite, sem cadastro. O servidor aceita no máximo 32 salas por processo. Esta implementação usa um processo com saves em disco; múltiplas réplicas independentes não compartilham salas. A página `/api/health` retorna o estado do processo e responde com 503 se o último salvamento falhar.
 
@@ -99,7 +105,9 @@ npm test
 npm run build
 ```
 
-Os testes online verificam os jogadores independentes, o avanço único dos inimigos, dano em combate, projéteis, ausência de fogo amigo, XP compartilhado, moedas, credenciais, comandos inválidos, expiração de comandos, exclusão de nascimento nas câmeras e preservação de progresso. Verificam também os preços e o alcance dos comerciantes, a coleta concorrente de um item, o resgate único de eventos e o rollback quando a gravação falha. A integração abre dois clientes HTTP reais, reconecta um jogador e reinicia o servidor para verificar o save. Um teste usa o mesmo transporte do navegador e verifica a substituição de uma aba duplicada sem ciclos de reconexão. Não há automação de gameplay no navegador.
+Os testes online verificam os jogadores independentes, o avanço único dos inimigos, dano em combate, projéteis, ausência de fogo amigo, XP compartilhado, moedas, credenciais, comandos inválidos, expiração de comandos, exclusão de nascimento nas câmeras e preservação de progresso. Verificam também os preços e o alcance dos comerciantes, a coleta concorrente de um item, o resgate único de eventos, transições de masmorras/Rifts/Expedições, viagens e o rollback quando a gravação falha. Os testes de atividades conferem ofertas geradas pelo servidor, acompanhamento independente, gravação antes da aceitação e recompensa única por chegada. Os testes de entrada preservam pressões rápidas de gamepad entre envios de rede.
+
+A integração abre dois clientes HTTP reais, reconecta um jogador e reinicia o servidor para verificar o save. Um teste usa o mesmo transporte do navegador e verifica as atividades individuais e a substituição de uma aba duplicada sem ciclos de reconexão. A CI executa a suíte em Windows e Linux e também constrói o contêiner, verificando sua saúde, arquivos de produção e API de entrada de dois jogadores. Não há automação de gameplay no navegador.
 
 ## Código e licença
 

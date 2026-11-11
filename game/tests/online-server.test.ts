@@ -91,6 +91,11 @@ test('the browser transport receives shared state and yields a duplicated sessio
     await until(()=>!!first&&!!second);
     assert.equal(first!.players.length,2);
     assert.equal(typeof first!.chart,'string');assert.equal(typeof second!.chart,'string');
+    await until(()=>!!first?.journeys?.offers.some(goal=>goal.finishedAt===undefined));
+    const goal=first!.journeys!.offers.find(goal=>goal.finishedAt===undefined)!;
+    await alice.post('command',{type:'journey',command:{type:'accept',id:goal.id}});
+    await until(()=>first?.journeys?.tracked===goal.id);
+    assert.equal(second!.journeys?.tracked,null);
     await alice.post('input',{sequence:1,input:{...idleInput(),moveY:1}});
     await until(()=>!!second?.players.some(member=>member.id===a.player&&member.player.y>0));
     assert.ok(second!.players.every(member=>member.player.attack===null||member.player.attack.hitIds instanceof Set));
