@@ -74,6 +74,7 @@ test('a cooperative rift keeps one clock and returns the party to the surface on
     assert.equal((await room.worldCommand(a,action)).ok,false);
     a.sim.player.level=b.sim.player.level=20;refreshCharacter(a.sim.player);refreshCharacter(b.sim.player);
     const result=await room.worldCommand(a,action);assert.equal(result.ok,true,result.message);
+    assert.throws(()=>room.join('Carol','fire'),/superfície/);
     const progress=currentDungeon(room.sim.expeditions)!.rift!;assert.equal(progress.elapsed,0);
     const now=Date.now();for(let i=0;i<120;i++)room.advance(now);
     assert.ok(Math.abs(progress.elapsed-1)<1e-6);

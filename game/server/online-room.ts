@@ -15,7 +15,7 @@ import type { CharacterSheet } from '../src/character-types.ts';
 import { LOOT_RULES } from '../src/combat-content.ts';
 import type { CombatViewport } from '../src/combat-visibility.ts';
 import { executeEvent, eventProblem, claimCompletedEvent, pendingEventReward } from '../src/poi-command.ts';
-import type { EventChoice } from '../src/poi-content.ts';
+import { isEventKind, type EventChoice } from '../src/poi-content.ts';
 import type { ActionResult } from '../src/character-types.ts';
 import { xpForNextLevel } from '../src/progression.ts';
 import { currentDungeon } from '../src/dungeon-state.ts';
@@ -24,6 +24,9 @@ import { DungeonWorld } from '../src/dungeon-world.ts';
 import { RiftWorld } from '../src/rift-world.ts';
 import { planDungeonTravel, dungeonChestProblem, claimDungeonChest, type DungeonAction } from '../src/dungeon-command.ts';
 import { startDungeonEvent } from '../src/dungeon-events.ts';
+import { Exploration } from '../src/exploration.ts';
+import { executeMapTravel, executePortalTravel, activatePortalAnchor } from '../src/travel-command.ts';
+import { townPortalAnchor, withinPortalReach, portalDepartureProblem } from '../src/travel.ts';
 import { idleInput, ONLINE_LIMITS, ONLINE_VERSION, object, type OnlineSnapshot, type RoomTicket } from '../src/online-protocol.ts';
 import type { Input } from '../src/model.ts';
 import type { CharacterCheckpoint } from '../src/character-save.ts';
@@ -35,11 +38,13 @@ export function equalSecret(a: string, b: unknown): boolean {
 export interface OnlineMember {
   id: string; token: string; sim: Simulation; input: Input; sequence: number; inputAt: number; seenAt: number; connected: boolean;
   viewport?: CombatViewport; exclusion?: CombatViewport;
+  chartSent?:number;
 }
 export interface SavedRoom {
   version: 1; id: string; invite: string; seed: number; tick: number; savedAt: number;
   checkpoint: CharacterCheckpoint;
   nextIdentity?: number;
+  chart?:string;
   members: { id: string; token: string; name: string; checkpoint: CharacterCheckpoint }[];
 }
 export class OnlineRoom {
@@ -49,6 +54,7 @@ export class OnlineRoom {
   readonly surface: WorldLandscape;
   world: WorldLandscape;
   readonly sim: Simulation;
+  readonly exploration:Exploration;
   readonly members = new Map<string, OnlineMember>();
   tick = 0;
   lastActive = Date.now();
@@ -56,15 +62,21 @@ export class OnlineRoom {
   private staged?: SavedRoom;
   private busy=false;
   private nextEventAt=0;
+  private nextChartAt=0;
+  private chartCache:{revision:number;data:string}|null=null;
+  private projectedBeacons=new Set<string>();
   persist?:()=>Promise<ActionResult>;
 
   constructor(seed: number, identity = { id: randomBytes(9).toString('base64url'), invite: secret() }) {
     this.id = identity.id; this.invite = identity.invite; this.seed = seed;
     this.surface = new WorldLandscape(seed);this.world=this.surface;
+    this.exploration=new Exploration(this.surface);
     this.sim = new Simulation(this.world, { seed });
   }
   join(name: string, loadout: string, now = Date.now()): RoomTicket {
     if (this.members.size >= ONLINE_LIMITS.players) throw new Error('Esta sala está cheia.');
+    const active=currentDungeon(this.sim.expeditions)?.entrance;
+    if(active?.rift||active?.expedition)throw new Error('Aguarde o grupo voltar à superfície para criar um personagem nesta sala.');
     if (!name.trim() || name.trim().length > 24 || !isStarterLoadoutId(loadout)) throw new Error('Nome ou equipamento inválido.');
     const sim = new Simulation(this.world, { seed: this.seed });
     sim.player.character = createCharacterSheet(loadout); refreshCharacter(sim.player);
@@ -103,6 +115,10 @@ export class OnlineRoom {
     if(this.busy)return;
     const active = [...this.members.values()].filter(member => member.connected);
     if (!active.length) return;
+    if(!this.sim.dungeonFloor&&now>=this.nextChartAt){
+      this.nextChartAt=now+500;for(const member of active)this.exploration.reveal(member.sim.player.x,member.sim.player.y);
+    }
+    this.projectBeacons();
     this.lastActive = now;
     for (const member of active) {
       const p = member.sim.player;
@@ -132,7 +148,7 @@ export class OnlineRoom {
           if(!result.ok)this.nextEventAt=now+30_000;
         }).catch(()=>{this.nextEventAt=now+30_000;});return;
       }
-      const member=active.find(m=>m.sim.eventChannel.ready||Object.values(this.sim.eventState.sites).some(record=>pendingEventReward(m.sim,record))
+      const member=active.find(m=>m.sim.portal.ready||m.sim.eventChannel.ready||Object.values(this.sim.eventState.sites).some(record=>pendingEventReward(m.sim,record))
         ||!!this.sim.dungeonFloor&&[0,1,2].some(index=>!dungeonChestProblem(m.sim,index)));
       if(member)void this.worldCommand(member,{type:'claimReady'}).then(result=>{
         if(!result.ok)this.nextEventAt=now+30_000;
@@ -144,13 +160,23 @@ export class OnlineRoom {
     const sims = [...this.members.values()].map(member => member.sim);
     const events = this.pendingEvents; this.pendingEvents = [];
     return { version: ONLINE_VERSION, tick: this.tick, time: this.sim.time,
-      players: [...this.members.values()].map(member => ({ id: member.id, connected: member.connected, player: member.sim.player,
+      players: [...this.members.values()].map(member => ({ id: member.id, connected: member.connected, player: member.sim.player,travel:member.sim.travel,
+        ...(member.sim.portal.origin?{portal:{origin:member.sim.portal.origin,elapsed:member.sim.portal.elapsed}}:{}),
         ...(member.sim.eventChannel.site?{channel:{site:member.sim.eventChannel.site,choice:member.sim.eventChannel.choice,elapsed:member.sim.eventChannel.elapsed}}:{}) })),
       enemies: this.sim.enemies, projectiles: [...this.sim.projectiles, ...sims.flatMap(sim => sim.projectiles)],
       groundEffects: sims.flatMap(sim => sim.groundEffects), chains: sims.flatMap(sim => sim.chains),
       pickups: this.sim.pickups, groundItems: this.sim.groundItems, groundGold: this.sim.groundGold,
       brokenContainers: [...this.sim.brokenContainers], eventState:this.sim.eventState,location:currentDungeon(this.sim.expeditions)?.entrance??null,
-      expeditions:this.sim.expeditions,events };
+      expeditions:this.sim.expeditions,clearedCamps:this.sim.clearedCampIds(),events };
+  }
+  chart():string{
+    if(this.chartCache?.revision!==this.exploration.revision)this.chartCache={revision:this.exploration.revision,data:this.exploration.serialize()};
+    return this.chartCache.data;
+  }
+  private projectBeacons():void{
+    for(const record of Object.values(this.sim.eventState.sites))if(record.kind==='watchtower'&&record.phase==='claimed'&&!this.projectedBeacons.has(record.id)){
+      this.exploration.revealFromBeacon(record.x,record.y,record.beaconTarget);this.projectedBeacons.add(record.id);
+    }
   }
   async worldCommand(member:OnlineMember,value:unknown):Promise<ActionResult>{
     if(this.busy)return {ok:false,message:'Aguarde a ação em andamento.'};
@@ -169,7 +195,8 @@ export class OnlineRoom {
         else{entry.checkpoint.events=checkpoint.events;entry.checkpoint.expeditions=checkpoint.expeditions;
           entry.checkpoint.groundItems=checkpoint.groundItems;entry.checkpoint.groundGold=checkpoint.groundGold;entry.checkpoint.pickups=checkpoint.pickups;
           if(locationChanged)Object.assign(entry.checkpoint,{x:checkpoint.x,y:checkpoint.y,actors:checkpoint.actors,clearedCamps:checkpoint.clearedCamps,
-            defeatedCampMembers:checkpoint.defeatedCampMembers,campWounds:checkpoint.campWounds,encounterScales:checkpoint.encounterScales});
+            defeatedCampMembers:checkpoint.defeatedCampMembers,campWounds:checkpoint.campWounds,encounterScales:checkpoint.encounterScales,
+            travel:{homeTown:entry.checkpoint.travel?.homeTown??0,returnTo:checkpoint.travel?.returnTo??null}});
           const other=this.members.get(entry.id)!;
           if(xp>0&&other.connected&&!other.sim.player.dead&&Math.hypot(other.sim.player.x-before.x,other.sim.player.y-before.y)<=1200){
             const player=structuredClone(other.sim.player),levels=awardCharacterExperience(player,xp);
@@ -183,7 +210,25 @@ export class OnlineRoom {
     try{
       let result:ActionResult;
       const sim=member.sim;
-      if(v.type==='dungeon'){
+      const trial=this.sim.eventState.trial,site=trial?this.sim.eventState.sites[trial.siteId]:undefined;
+      const staying=site&&[...this.members.values()].some(other=>other!==member&&other.connected&&!other.sim.player.dead&&Math.hypot(other.sim.player.x-site.x,other.sim.player.y-site.y)<=700);
+      if(v.type==='portalStart'){
+        const problem=portalDepartureProblem(sim.player,sim.world);if(problem)return {ok:false,message:problem};
+        sim.clearInput();member.input=idleInput();this.nextEventAt=0;
+        const message=sim.portal.start(sim.player,sim.world);return {ok:!message,...(message?{message}:{})};
+      }
+      if(v.type==='claimReady'&&sim.portal.ready&&sim.dungeonFloor)Object.assign(v,{type:'dungeon',kind:'town'});
+      if(v.type==='portalReturn'&&sim.travel.returnTo?.dungeon)Object.assign(v,{type:'dungeon',kind:'return'});
+      if(v.type==='mapTravel'&&typeof v.id==='string'&&v.id.length<=120){
+        result=await executeMapTravel(sim,this.exploration,v.id,persist,!staying);
+      }else if(v.type==='setHome'){
+        const p=sim.player,anchor=this.surface.getSettlements(p.x-200,p.y-200,400,400).map(townPortalAnchor).find(anchor=>withinPortalReach(p,anchor,sim.world));
+        if(!anchor)return {ok:false,message:'Aproxime-se do marco da cidade.'};result=await activatePortalAnchor(sim,anchor,persist);
+      }else if(v.type==='portalReturn'||v.type==='claimReady'&&sim.portal.ready){
+        const returning=v.type==='portalReturn',band=returning?sim.travel.returnTo?.town:sim.travel.homeTown;
+        if(band===undefined)return {ok:false,message:'Portal de retorno indisponível.'};
+        result=await executePortalTravel(sim,this.surface.getPortalAnchor(band),returning,persist,!staying);
+      }else if(v.type==='dungeon'){
         let action:DungeonAction;
         const p=sim.player;
         if(v.kind==='enter'&&typeof v.id==='string'){
@@ -191,6 +236,8 @@ export class OnlineRoom {
           if(!entrance)return {ok:false,message:'Entrada indisponível.'};action={kind:'enter',entrance};
         }else if(v.kind==='exit')action={kind:'exit'};
         else if(v.kind==='recover'&&currentDungeon(this.sim.expeditions)?.rift?.phase==='failed')action={kind:'death'};
+        else if(v.kind==='town')action={kind:'town',anchor:this.surface.getPortalAnchor(sim.travel.homeTown)};
+        else if(v.kind==='return'&&sim.travel.returnTo?.dungeon)action={kind:'return',anchor:this.surface.getPortalAnchor(sim.travel.returnTo.town)};
         else if(v.kind==='rift'&&typeof v.portalId==='string'&&v.portalId.length<200&&Number.isInteger(v.offset)&&Math.abs(Number(v.offset))<=10&&Number.isSafeInteger(v.attempt)
           &&(v.keyId===undefined||typeof v.keyId==='string'&&v.keyId.length<200))action={kind:'rift',portalId:v.portalId,offset:Number(v.offset),attempt:Number(v.attempt),keyId:v.keyId as string|undefined};
         else if(v.kind==='expedition'&&typeof v.tableId==='string'&&v.tableId.length<200&&Number.isInteger(v.choice)&&Number(v.choice)>=-1&&Number(v.choice)<=2
@@ -198,11 +245,13 @@ export class OnlineRoom {
           action={kind:'expedition',tableId:v.tableId,choice:Number(v.choice),attempt:Number(v.attempt),restart:v.restart===true,resume:v.resume as string|undefined};
         else return {ok:false,message:'Transição inválida.'};
         const living=[...this.members.values()].filter(m=>m.connected&&!m.sim.player.dead);
-        if(action.kind!=='death'&&living.some(m=>Math.hypot(m.sim.player.x-p.x,m.sim.player.y-p.y)>180))return {ok:false,message:'Reúna os jogadores vivos perto da entrada ou saída.'};
-        if((action.kind==='rift'||action.kind==='expedition')&&living.some(m=>m.sim.player.level<20))return {ok:false,message:'Todos os jogadores precisam alcançar o nível 20.'};
+        if(action.kind!=='death'&&living.some(m=>Math.hypot(m.sim.player.x-p.x,m.sim.player.y-p.y)>180)){
+          sim.portal.cancel();return {ok:false,message:'Reúna os jogadores vivos perto da entrada ou saída.'};
+        }
+        if((action.kind==='rift'||action.kind==='expedition')&&[...this.members.values()].some(m=>m.sim.player.level<20))return {ok:false,message:'Todos os personagens da sala precisam alcançar o nível 20.'};
         locationChanged=true;
         const travel=await planDungeonTravel(sim,action,this.surface,persist);
-        if(!travel.ok)return travel;
+        if(!travel.ok){sim.portal.cancel();return travel;}
         const saved=this.staged!;
         const nextIdentity=this.sim.nextEntityIdentity;
         this.setWorld(travel.checkpoint);
@@ -224,7 +273,7 @@ export class OnlineRoom {
         const channel=sim.eventChannel;
         if(channel.ready&&channel.site){
           const site=channel.site,target=site.kind==='watchtower'?this.world.getPOIs(site.x-2400,site.y-2400,4800,4800)
-            .filter(poi=>poi.id!==site.id&&!this.sim.eventState.sites[poi.id])
+            .filter(poi=>poi.id!==site.id&&isEventKind(poi.kind)&&!this.exploration.isDiscovered(poi.id))
             .sort((a,b)=>Math.hypot(a.x-site.x,a.y-site.y)-Math.hypot(b.x-site.x,b.y-site.y))[0]:undefined;
           result=await executeEvent(sim,site,channel.choice,persist,target);channel.cancel();
         }else{
@@ -250,6 +299,7 @@ export class OnlineRoom {
           if(reward.levels)this.pendingEvents.push({player:reward.member.id,event:{type:'level',x:p.x,y:p.y,level:p.level,skillPoints:reward.levels,statPoints:reward.levels*5,color:'#c0acf0'}});
         }
         sim.copyCooperativeWorldTo(this.sim);for(const other of this.members.values())this.sim.copyCooperativeWorldTo(other.sim);
+        this.projectBeacons();
       }
       return result;
     }finally{this.staged=undefined;this.busy=false;}
@@ -350,6 +400,7 @@ export class OnlineRoom {
     if(this.staged)return this.staged;
     return { version: 1, id: this.id, invite: this.invite, seed: this.seed, tick: this.tick, savedAt: now,
       nextIdentity:this.sim.nextEntityIdentity,
+      chart:this.chart(),
       checkpoint: this.sim.captureCheckpoint(), members: [...this.members.values()].map(member => ({ id: member.id,
         token: member.token, name: member.sim.player.name ?? 'Viajante', checkpoint: member.sim.captureCheckpoint() })) };
   }
@@ -357,6 +408,8 @@ export class OnlineRoom {
     const room = new OnlineRoom(saved.seed, saved);
     room.tick = saved.tick; room.lastActive = saved.savedAt;room.setWorld(saved.checkpoint);room.sim.world=room.world; room.sim.restoreCheckpoint(saved.checkpoint);
     room.sim.reserveIdentity(saved.nextIdentity??1);
+    if(saved.chart&&!room.exploration.restore(saved.chart))throw new Error('Could not restore the online exploration chart.');
+    room.projectBeacons();
     for (const entry of saved.members) {
       const sim = new Simulation(room.world, { seed: saved.seed });
       sim.restoreCheckpoint(entry.checkpoint); sim.player.name = entry.name;
@@ -372,5 +425,5 @@ export class OnlineRoom {
     else{const floor=generateDungeon(run.entrance.seed,run.entrance.level,run.entrance);this.world=run.entrance.rift?new RiftWorld(floor,run.entrance):new DungeonWorld(floor,run.entrance);}
     if(old!==this.surface&&old!==this.world)old.dispose();
   }
-  dispose(): void { this.world.dispose();if(this.world!==this.surface)this.surface.dispose(); }
+  dispose(): void { this.exploration.dispose();this.world.dispose();if(this.world!==this.surface)this.surface.dispose(); }
 }

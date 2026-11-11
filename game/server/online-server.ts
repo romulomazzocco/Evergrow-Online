@@ -102,7 +102,7 @@ export async function createOnlineServer(options: Options = {}) {
       limit('member:'+member.id, 60, 1000);
       if (action === 'events' && req.method === 'GET') {
         const old = streams.get(member);
-        streams.set(member,res); old?.end('event: replaced\ndata: {}\n\n'); member.connected = true; member.seenAt = Date.now(); member.inputAt = 0; member.input = idleInput();
+        streams.set(member,res); old?.end('event: replaced\ndata: {}\n\n'); member.connected = true;member.chartSent=undefined; member.seenAt = Date.now(); member.inputAt = 0; member.input = idleInput();
         res.writeHead(200, { 'Content-Type':'text/event-stream', 'Cache-Control':'no-cache, no-transform', Connection:'keep-alive', 'X-Accel-Buffering':'no' });
         res.write(': connected\n\n');
         res.on('close', () => disconnect(member,res));
@@ -112,12 +112,15 @@ export async function createOnlineServer(options: Options = {}) {
         const v = await body(req), input = validInput(v.input);
         if (!input || !Number.isSafeInteger(v.sequence)) throw new HttpError(400, 'Comandos inválidos.');
         const accepted=room.input(member,input,Number(v.sequence));
-        if(accepted)room.camera(member,v.viewport,v.exclusion);
+        if(accepted){
+          room.camera(member,v.viewport,v.exclusion);
+          if(v.blocked===true){member.input=idleInput();member.sim.clearInput();}
+        }
         json(res,200,{ ok: accepted, sequence: member.sequence }); return;
       }
       if (action === 'command' && req.method === 'POST') {
         const value=await body(req);
-        const result=['event','dungeon','dungeonEvent'].includes(String(value.type))?await room.worldCommand(member,value):room.command(member,value);
+        const result=['event','dungeon','dungeonEvent','mapTravel','portalStart','portalReturn','setHome'].includes(String(value.type))?await room.worldCommand(member,value):room.command(member,value);
         json(res,result.ok?200:400,result); return;
       }
       if (action === 'leave' && req.method === 'POST') {
@@ -144,10 +147,12 @@ export async function createOnlineServer(options: Options = {}) {
       const frame = room.frame();
       for (const member of room.members.values()) {
         const stream = streams.get(member);
-        if (!stream) continue;
-        if (stream.writableLength > 1_000_000 || now-member.inputAt > 30_000 && member.inputAt !== 0) { stream.end(); continue; }
+        if (!stream||stream.destroyed||stream.writableEnded) continue;
+        if (stream.writableLength > ONLINE_LIMITS.snapshot || now-member.inputAt > 30_000 && member.inputAt !== 0) { stream.end(); continue; }
         if (stream.writableLength > 64_000) continue;
-        stream.write('data: '+encodeOnline({ ...frame,self:member.id })+'\n\n');
+        const chart=member.chartSent!==room.exploration.revision?room.chart():undefined;
+        member.chartSent=room.exploration.revision;
+        stream.write('data: '+encodeOnline({ ...frame,self:member.id,...(chart?{chart}:{}) })+'\n\n');
       }
     }
   }, 8);

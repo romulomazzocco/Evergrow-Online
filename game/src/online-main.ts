@@ -34,6 +34,15 @@ import { dungeonRunExit } from './dungeon-locations.ts';
 import { RiftPanel } from './rift-panel.ts';
 import { ExpeditionPanel } from './expedition-panel.ts';
 import { drawRiftHUD } from './rift-hud.ts';
+import { Exploration } from './exploration.ts';
+import { WorldMap } from './world-map.ts';
+import { DungeonMap, drawCryptMinimap } from './dungeon-map.ts';
+import { mapTravelProblem } from './travel-command.ts';
+import { activityStatus } from './activity-status.ts';
+import { getMinimapRect, getMinimapChartRect, projectMapPoint } from './map-view.ts';
+import { portalMapMarkers, townPortalAnchor, withinPortalReach } from './travel.ts';
+import './world-map.css';
+import './dungeon.css';
 
 installUITheme();
 const app=document.querySelector<HTMLElement>('#app')!;
@@ -110,21 +119,25 @@ class OnlineGame {
   private connected=false;
   private sending=false;
   private sequence=Date.now();
-  private panel:'inventory'|'skills'|'service'|'event'|'rift'|'expedition'|null=null;
+  private panel:'inventory'|'skills'|'service'|'event'|'rift'|'expedition'|'map'|null=null;
   private inventory:InventoryPanel;
   private skills:SkillTreePanel;
   private service:ServicePanel;
   private events:EventPanel;
   private rifts:RiftPanel;
   private expeditions:ExpeditionPanel;
+  private exploration:Exploration;
+  private worldMap:WorldMap;
+  private dungeonMap:DungeonMap;
   private companions:Player[]=[];
   private lastParty='';
   private reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   constructor(ticket:RoomTicket){
     this.surface=new World(ticket.seed);this.world=this.surface;this.sim=new Simulation(this.world,{seed:ticket.seed,spawn:false});
+    this.exploration=new Exploration(this.surface);
     app.innerHTML=`<div class="online-game"><canvas id="online-world" tabindex="0" aria-label="Evergrow Online"></canvas><canvas id="online-ui" aria-hidden="true"></canvas>
-      <nav class="online-bar" aria-label="Sala"><span id="online-connection" role="status">Conectando…</span><button id="online-copy">Copiar convite</button><button id="online-inventory">Inventário</button><button id="online-skills">Habilidades</button><button id="online-exit" hidden>Sair da masmorra</button><button id="online-leave">Sair</button></nav>
+      <nav class="online-bar" aria-label="Sala"><span id="online-connection" role="status">Conectando…</span><button id="online-copy">Copiar convite</button><button id="online-inventory">Inventário</button><button id="online-skills">Habilidades</button><button id="online-map">Mapa</button><button id="online-home">Portal</button><button id="online-exit" hidden>Sair da masmorra</button><button id="online-leave">Sair</button></nav>
       <ul id="online-party" class="online-party" aria-label="Jogadores na sala"></ul>
       <p id="online-toast" class="online-toast" role="status" hidden></p>
       <section id="online-death" class="online-death" hidden><h2>Você caiu</h2><p>Seus companheiros continuam na floresta.</p><button id="online-revive" class="online-primary">Voltar ao acampamento</button></section>
@@ -157,6 +170,16 @@ class OnlineGame {
     };
     this.rifts=new RiftPanel(mount,{close:()=>this.closePanel(),enter:travel});
     this.expeditions=new ExpeditionPanel(mount,{close:()=>this.closePanel(),enter:travel});
+    this.worldMap=new WorldMap(this.surface,this.exploration,mount,()=>this.closePanel());
+    this.worldMap.setPortalMarkers(()=>portalMapMarkers(this.sim.travel,band=>this.surface.getPortalAnchor(band)));
+    this.worldMap.setActivityStateReader(poi=>activityStatus(poi,{events:this.sim.eventState,expeditions:this.sim.expeditions,campCleared:id=>this.sim.getCampState(id)==='cleared'}));
+    this.worldMap.setTravel({problem:id=>mapTravelProblem(this.sim,this.exploration,id),travel:async id=>{
+      try{const result=await this.client.post('command',{type:'mapTravel',id});this.closePanel();return {ok:true,message:String(result.message??'')};}
+      catch(error){return {ok:false,message:(error as Error).message};}
+    }});
+    this.dungeonMap=new DungeonMap(mount,()=>this.closePanel(),()=>{
+      this.dungeonMap.close();this.worldMap.open({x:this.sim.expeditions.surfaceX,y:this.sim.expeditions.surfaceY,angle:0});
+    });
     this.client=new OnlineClient(ticket,snapshot=>this.snapshot(snapshot),(status,connected)=>{
       this.connected=connected;const label=app.querySelector<HTMLElement>('#online-connection');if(label){label.textContent=status;label.dataset.connected=String(connected);}
       if(!connected)this.input.clear();
@@ -175,6 +198,8 @@ class OnlineGame {
     },{signal});
     app.querySelector('#online-inventory')!.addEventListener('click',()=>this.openPanel('inventory'),{signal});
     app.querySelector('#online-skills')!.addEventListener('click',()=>this.openPanel('skills'),{signal});
+    app.querySelector('#online-map')!.addEventListener('click',()=>this.openMap(),{signal});
+    app.querySelector('#online-home')!.addEventListener('click',()=>this.homePortal(),{signal});
     app.querySelector('#online-exit')!.addEventListener('click',()=>this.command({type:'dungeon',kind:'exit'}),{signal});
     app.querySelector('#online-revive')!.addEventListener('click',()=>this.command({type:'revive'}),{signal});
     this.canvas.addEventListener('contextmenu',event=>event.preventDefault(),{signal});
@@ -182,6 +207,8 @@ class OnlineGame {
     this.canvas.addEventListener('pointerdown',event=>{
       this.canvas.focus();void this.audio.unlock();
       this.input.movePointer(event.clientX,event.clientY,this.canvas.getBoundingClientRect(),this.renderer.width,this.renderer.height);
+      const map=getMinimapRect(this.renderer.width,this.renderer.height),pointer=this.input.pointer;
+      if(event.button===0&&pointer.x>=map.x&&pointer.y>=map.y&&pointer.x<map.x+map.width&&pointer.y<map.y+map.height){this.openMap();return;}
       const loot=hoveredGroundLoot(this.renderer.groundLootLabels,this.input.pointer.x,this.input.pointer.y);
       if(event.button===0&&loot){this.command({type:'pickup',id:loot.id});return;}
       if(event.button===0&&this.openService(this.renderer.screenToWorld(this.input.pointer.x,this.input.pointer.y)))return;
@@ -194,6 +221,8 @@ class OnlineGame {
       if(event.code==='Escape'){this.closePanel();return;}
       if(event.code==='KeyI'||event.code==='KeyC'){event.preventDefault();if(!event.repeat)this.openPanel('inventory');return;}
       if(event.code==='KeyT'){event.preventDefault();if(!event.repeat)this.openPanel('skills');return;}
+      if(controls.action(event.code)==='map'){event.preventDefault();if(!event.repeat)this.openMap();return;}
+      if(controls.action(event.code)==='portal'){event.preventDefault();if(!event.repeat)this.homePortal();return;}
       if(this.panel)return;
       if(controls.action(event.code)==='interact'){event.preventDefault();if(!event.repeat&&!this.openService())this.openEvent();return;}
       if(controls.action(event.code)){event.preventDefault();this.input.keyDown(event.code);}
@@ -214,7 +243,19 @@ class OnlineGame {
     if(!this.connected){this.toast('Aguarde a conexão com a sala.');return;}
     void this.client.post('command',value).catch(error=>this.toast((error as Error).message));
   }
-  private closePanel():void {this.inventory.close();this.skills.close();this.service.close();this.events.close();this.rifts.close();this.expeditions.close();this.panel=null;this.input.clear();this.canvas.focus();}
+  private closePanel():void {this.inventory.close();this.skills.close();this.service.close();this.events.close();this.rifts.close();this.expeditions.close();this.worldMap.close();this.dungeonMap.close();this.panel=null;this.input.clear();this.canvas.focus();}
+  private openMap():void{
+    if(!this.lastSnapshot)return;
+    const previous=this.panel;this.closePanel();if(previous==='map')return;this.panel='map';
+    const run=currentDungeon(this.sim.expeditions);
+    if(run&&this.sim.dungeonFloor)this.dungeonMap.open(this.sim.dungeonFloor,run,this.sim.player,false,this.sim.enemies);
+    else this.worldMap.open(this.sim.player);
+  }
+  private homePortal():void{
+    if(!this.lastSnapshot||this.sim.player.dead)return;
+    this.closePanel();const link=this.sim.travel.returnTo;
+    this.command({type:link&&withinPortalReach(this.sim.player,this.surface.getPortalAnchor(link.town),this.world)?'portalReturn':'portalStart'});
+  }
   private openEvent(pointer?:{x:number;y:number}):boolean {
     if(this.sim.dungeonFloor){
       const floor=this.sim.dungeonFloor,p=this.sim.player,run=currentDungeon(this.sim.expeditions)!;
@@ -225,6 +266,9 @@ class OnlineGame {
       }
       return false;
     }
+    const anchor=this.surface.getSettlements(this.sim.player.x-150,this.sim.player.y-150,300,300).map(townPortalAnchor)
+      .find(anchor=>withinPortalReach(this.sim.player,anchor,this.world)&&(!pointer||Math.hypot(pointer.x-anchor.x,pointer.y-(anchor.y-25))<42));
+    if(anchor){this.command({type:this.sim.travel.returnTo?.town===anchor.band?'portalReturn':'setHome'});return true;}
     const p=this.sim.player,building=this.world.getBuildings(p.x-180,p.y-180,360,360)
       .filter(b=>(b.kind==='rift'||b.kind==='expedition')&&Math.hypot(p.x-b.door.x,p.y-b.door.y)<=90
         &&(!pointer||Math.hypot(pointer.x-(b.x+b.width/2),pointer.y-(b.y+b.height/2))<Math.max(b.width,b.height)))
@@ -257,9 +301,10 @@ class OnlineGame {
   private sendInput():void {
     if(!this.connected||this.sending)return;
     const aim=this.renderer.screenToWorld(this.input.pointer.x,this.input.pointer.y);
-    const input=this.panel||document.hidden||!document.hasFocus()?idleInput():this.input.consume(aim,false);
+    const blocked=!!this.panel||document.hidden||!document.hasFocus();
+    const input=blocked?idleInput():this.input.consume(aim,false);
     this.sending=true;this.sequence=Math.max(Date.now(),this.sequence+1);
-    void this.client.post('input',{sequence:this.sequence,input,viewport:this.renderer.combatViewport,exclusion:this.renderer.spawnExclusionBounds(this.sim.player)})
+    void this.client.post('input',{sequence:this.sequence,input,blocked,viewport:this.renderer.combatViewport,exclusion:this.renderer.spawnExclusionBounds(this.sim.player)})
       .catch(()=>{}).finally(()=>{this.sending=false;});
   }
   private snapshot(snapshot:OnlineSnapshot):void {
@@ -275,6 +320,8 @@ class OnlineGame {
       this.sim.world=this.world;this.renderer.reset();if(previous!==this.surface)previous.dispose();
     }
     this.sim.expeditions=snapshot.expeditions;
+    this.sim.clearedCampProjection=new Set(snapshot.clearedCamps);
+    if(snapshot.chart&&this.exploration.restore(snapshot.chart))this.exploration.storageStatus='saved';
     // Retain the previous delivered positions, rather than a 120 Hz position that
     // is only a fraction of a network frame away from the current position.
     const position=(next:{x:number;y:number;prevX:number;prevY:number},before?:{x:number;y:number})=>{
@@ -289,6 +336,7 @@ class OnlineGame {
     this.sim.groundEffects=snapshot.groundEffects;this.sim.chains=snapshot.chains;this.sim.pickups=snapshot.pickups;
     this.sim.groundItems=snapshot.groundItems;this.sim.groundGold=snapshot.groundGold;
     this.sim.eventState=snapshot.eventState;
+    this.sim.travel=own.travel;this.sim.portal.origin=own.portal?.origin??null;this.sim.portal.elapsed=own.portal?.elapsed??0;
     if(own.channel){this.sim.eventChannel.start(own.channel.site,own.channel.choice);this.sim.eventChannel.elapsed=own.channel.elapsed;}
     else this.sim.eventChannel.cancel();
     this.sim.brokenContainers.clear();for(const id of snapshot.brokenContainers)this.sim.brokenContainers.add(id);
@@ -324,6 +372,19 @@ class OnlineGame {
       this.renderer.render(this.sim,this.world,dt,settings);this.fx.render(this.renderer.canvas,this.renderer.hurt,this.renderer.emission);
       this.ctx.clearRect(0,0,this.ui.width,this.ui.height);this.renderer.renderUI(this.ctx,this.sim,this.world,settings);
       const run=currentDungeon(this.sim.expeditions);if(run?.rift)drawRiftHUD(this.ctx,run,this.renderer.width);
+      if(run&&this.sim.dungeonFloor){
+        drawCryptMinimap(this.ctx,this.sim.dungeonFloor,run,this.sim.player,this.renderer.width,this.renderer.height,null,this.sim.time,this.sim.enemies);
+        if(this.panel==='map')this.dungeonMap.update(this.sim.player,this.sim.enemies,run);
+      }else{
+        this.worldMap.update(this.sim.player,dt);this.worldMap.drawMinimap(this.ctx,this.sim.player,this.renderer.width,this.renderer.height,this.sim.time,this.sim.enemies);
+      }
+      const chart=getMinimapChartRect(getMinimapRect(this.renderer.width,this.renderer.height));
+      for(const companion of this.companions){
+        const point=projectMapPoint(companion.x,companion.y,{...chart,centerX:this.sim.player.x,centerY:this.sim.player.y,zoom:run?.entrance? .095:.05});
+        if(point.x>chart.x&&point.x<chart.x+chart.width&&point.y>chart.y&&point.y<chart.y+chart.height){
+          this.ctx.fillStyle=companion.dead?'#bd8277':'#98dbc5';this.ctx.beginPath();this.ctx.arc(point.x,point.y,3,0,Math.PI*2);this.ctx.fill();
+        }
+      }
       for(const companion of this.companions){
         const x=companion.prevX+(companion.x-companion.prevX)*alpha,y=companion.prevY+(companion.y-companion.prevY)*alpha;
         const point=this.renderer.worldToScreen(x,y-70);text(this.ctx,companion.name??'Viajante',point.x,point.y,.8,'#b9dfcc','center');
@@ -333,7 +394,7 @@ class OnlineGame {
   }
   dispose():void {
     this.abort.abort();this.client.dispose();clearInterval(this.inputTimer);cancelAnimationFrame(this.frame);
-    this.inventory.dispose();this.skills.dispose();this.service.dispose();this.events.dispose();this.rifts.dispose();this.expeditions.dispose();this.renderer.reset();this.fx.dispose();this.audio.dispose();this.world.dispose();if(this.world!==this.surface)this.surface.dispose();
+    this.inventory.dispose();this.skills.dispose();this.service.dispose();this.events.dispose();this.rifts.dispose();this.expeditions.dispose();this.worldMap.dispose();this.dungeonMap.dispose();this.exploration.dispose();this.renderer.reset();this.fx.dispose();this.audio.dispose();this.world.dispose();if(this.world!==this.surface)this.surface.dispose();
   }
 }
 

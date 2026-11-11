@@ -90,6 +90,7 @@ test('the browser transport receives shared state and yields a duplicated sessio
     const bob=new OnlineClient(b,frame=>{second=frame;},()=>{});clients.push(alice,bob);alice.connect();bob.connect();
     await until(()=>!!first&&!!second);
     assert.equal(first!.players.length,2);
+    assert.equal(typeof first!.chart,'string');assert.equal(typeof second!.chart,'string');
     await alice.post('input',{sequence:1,input:{...idleInput(),moveY:1}});
     await until(()=>!!second?.players.some(member=>member.id===a.player&&member.player.y>0));
     assert.ok(second!.players.every(member=>member.player.attack===null||member.player.attack.hitIds instanceof Set));

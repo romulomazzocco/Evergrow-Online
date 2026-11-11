@@ -298,7 +298,10 @@ export class Simulation {
       && bounds.width > 0 && bounds.height > 0 ? { ...bounds } : null;
   }
 
-  getCampState(id: string): CampState { return this.camps.getState(id); }
+  /** Network presentation can project cleared camps without restoring/resetting the run. */
+  clearedCampProjection:ReadonlySet<string>|null=null;
+  clearedCampIds():string[]{return this.camps.clearedIds();}
+  getCampState(id: string): CampState { return this.clearedCampProjection?.has(id)?'cleared':this.camps.getState(id); }
 
   /** Call when focus/control context changes, including pause and resume. */
   clearInput(preserveMovement = false): void {
@@ -408,6 +411,7 @@ export class Simulation {
         sim.updatePlayer(dt, sim.groundPickup.input(p, sim.groundItems, sim.world, sim.time, dt, input));
         metric(p.chronicle, 'time', dt);
         sim.eventChannel.advance(dt,p,input);
+        sim.portal.advance(dt,p,input);
         if(p.character.blessing&&!sim.world.isSanctuary?.(p.x,p.y)){
           p.character.blessing.remaining=Math.max(0,p.character.blessing.remaining-dt);
           if(!p.character.blessing.remaining){delete p.character.blessing;refreshCharacter(p);}

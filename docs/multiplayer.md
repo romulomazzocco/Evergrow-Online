@@ -15,7 +15,7 @@ O servidor precisa continuar executando. Abrir duas cópias estáticas do jogo e
 
 ## Controles
 
-WASD move, o mouse mira e o botão esquerdo ataca. Espaço esquiva e Q usa poção. I ou C abre o inventário e T abre as habilidades. Clique no nome de um item no chão para recolhê-lo. Escape fecha as janelas. Os menus deixam a partida em andamento, então use o acampamento para organizar o personagem.
+WASD move, o mouse mira e o botão esquerdo ataca. Espaço esquiva e Q usa poção. I ou C abre o inventário, T abre as habilidades, M abre o mapa e P abre o portal da cidade. Clique no nome de um item no chão para recolhê-lo. Escape fecha as janelas. Os menus deixam a partida em andamento, então use o acampamento para organizar o personagem.
 
 Cada jogador escolhe entre os seis equipamentos iniciais. O inventário, as escolhas de atributos e a árvore de habilidades usam as regras originais. Inimigos podem atacar qualquer jogador próximo. Os aliados não causam dano entre si. Uma morte de inimigo cria um único conjunto de itens e moedas; os personagens vivos a até 1.200 unidades recebem experiência individualmente. Itens e moedas pertencem ao primeiro jogador que os recolhe.
 
@@ -80,9 +80,13 @@ Os eventos do mundo usam um registro compartilhado. Pressione E ou clique no obj
 
 Masmorras, Expedições e Crimson Rifts também são compartilhadas. Reúna os jogadores vivos a até 180 unidades de quem abre a entrada ou saída. O grupo atravessa junto e mantém os personagens, inventários e recursos individuais. Baús e guardiões pertencem à instância da sala, com um único registro de resgate. Quem entrar na sala depois aparece na entrada da instância ativa.
 
-Expedições e Rifts exigem nível 20 de todos os jogadores conectados. A rota da Expedição pode ser retomada pela mesa, preservando ferimentos e progresso. A Rift usa um único relógio de dez minutos; o tempo não acelera com o tamanho do grupo. Ao expirar, o servidor salva o retorno à superfície antes de mover os jogadores.
+Expedições e Rifts exigem nível 20 de todos os personagens da sala. Aguarde o grupo voltar à superfície para criar um novo personagem durante essas atividades. A rota da Expedição pode ser retomada pela mesa, preservando ferimentos e progresso. A Rift usa um único relógio de dez minutos; o tempo não acelera com o tamanho do grupo. Ao expirar, o servidor salva o retorno à superfície antes de mover os jogadores.
 
-As telas e o combate usam o código original. Mapas e viagens pela superfície, suporte touch e controles de console ainda precisam de fluxos cooperativos completos e continuam disponíveis no modo solo.
+O mapa da superfície é compartilhado e salvo no servidor. O minimapa mostra os companheiros; o mapa completo permite viajar a locais já visitados pelo grupo. Um lugar apenas avistado por uma torre não libera teleporte até uma visita real. O servidor resolve o destino pelo identificador descoberto, sem aceitar coordenadas de chegada do navegador.
+
+O portal pessoal exige três segundos parado e preserva um ponto de retorno. Na superfície ele move apenas seu dono; quem ficar em um evento continua enfrentando seus guardiões. Marcos de cidade permitem definir um novo lar. Uma viagem entre masmorra e superfície leva a sala inteira e exige que os jogadores vivos se reúnam. O retorno, os recursos pessoais e o estado dos dois cenários são salvos antes da transição.
+
+As telas e o combate usam o código original. O suporte touch e os adaptadores de controle de console para o cooperativo ainda estão em integração; o modo solo mantém seus controles anteriores.
 
 As salas são privadas por convite, sem cadastro. O servidor aceita no máximo 32 salas por processo. Esta implementação usa um processo com saves em disco; múltiplas réplicas independentes não compartilham salas. A página `/api/health` retorna o estado do processo e responde com 503 se o último salvamento falhar.
 

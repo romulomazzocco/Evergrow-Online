@@ -1,4 +1,4 @@
-import { decodeOnline, type OnlineSnapshot, type RoomTicket } from './online-protocol.ts';
+import { decodeOnline, ONLINE_LIMITS, type OnlineSnapshot, type RoomTicket } from './online-protocol.ts';
 
 /** HTTP streaming works through the same HTTPS origin as the game. No account,
  * WebRTC permissions or extra public ports are needed by the browser. */
@@ -45,7 +45,7 @@ export class OnlineClient {
         while(!signal.aborted){
           const {value,done}=await reader.read();if(done)break;
           buffer+=decoder.decode(value,{stream:true});
-          if(buffer.length>4_000_000)throw new Error('Resposta do servidor muito grande.');
+          if(buffer.length>ONLINE_LIMITS.snapshot)throw new Error('Resposta do servidor muito grande.');
           let end:number;
           while((end=buffer.indexOf('\n\n'))>=0){
             const message=buffer.slice(0,end);buffer=buffer.slice(end+2);
