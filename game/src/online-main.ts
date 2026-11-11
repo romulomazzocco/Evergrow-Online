@@ -582,5 +582,5 @@ class OnlineGame {
   }
 }
 
-showLobby();
+void loadGameFont().then(()=>showLobby(),()=>showLobby('Não foi possível carregar as fontes locais. Recarregue a página para tentar novamente.'));
 if(import.meta.hot)import.meta.hot.dispose(()=>{game?.dispose();game=undefined;});
