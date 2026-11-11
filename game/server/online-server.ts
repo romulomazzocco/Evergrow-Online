@@ -117,7 +117,7 @@ export async function createOnlineServer(options: Options = {}) {
       }
       if (action === 'command' && req.method === 'POST') {
         const value=await body(req);
-        const result=value.type==='event'?await room.worldCommand(member,value):room.command(member,value);
+        const result=['event','dungeon','dungeonEvent'].includes(String(value.type))?await room.worldCommand(member,value):room.command(member,value);
         json(res,result.ok?200:400,result); return;
       }
       if (action === 'leave' && req.method === 'POST') {

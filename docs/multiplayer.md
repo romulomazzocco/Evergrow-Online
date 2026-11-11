@@ -25,7 +25,7 @@ O navegador guarda a credencial do personagem na sessão da aba. **Retomar minha
 
 Uma interrupção de rede inicia a reconexão automática. Comandos antigos expiram após 600 ms. Enquanto outros jogadores continuam, a vaga desconectada fica reservada por dois minutos. Se todos saírem sem usar **Sair**, a sala fica pausada e pode ser retomada por até sete dias. **Sair** remove o personagem da sala e libera sua vaga. Fechar a aba encerra o armazenamento de sessão conforme as regras do navegador; mantenha a aba para retomar seu personagem.
 
-Ao cair, use **Voltar ao acampamento**. O personagem mantém os equipamentos e a progressão, enquanto os outros continuam jogando.
+Ao cair, use **Voltar ao acampamento** na superfície ou **Voltar à entrada** em uma masmorra. O personagem mantém os equipamentos e a progressão, enquanto os outros continuam jogando.
 
 O servidor salva as salas a cada dez segundos e no encerramento normal. Os dados ficam em `game/online-data/rooms.json` na execução pelo comando npm. Um encerramento abrupto pode perder até dez segundos de progresso. Não publique essa pasta: ela contém as credenciais de reconexão. Use um volume persistente em hospedagens e mantenha cópias de segurança desse arquivo. Os saves do modo solo ficam separados.
 
@@ -78,7 +78,11 @@ O cooperativo implementa exploração no mundo procedural, combate, inimigos com
 
 Os eventos do mundo usam um registro compartilhado. Pressione E ou clique no objetivo próximo para inspecionar suas opções. Guardiões, ondas, selos, canais de ritual e baús avançam para a sala inteira; a experiência de conclusão é repartida entre os personagens próximos e o loot é criado uma única vez. O servidor salva a recompensa e o registro de resgate antes de publicá-los. Se a gravação falhar, nenhuma recompensa ou abertura é aplicada.
 
-As telas e o combate usam o código original. Viagens, masmorras, Expedições, Crimson Rifts, suporte touch e controles de console continuam disponíveis no modo solo e ainda precisam de fluxos cooperativos.
+Masmorras, Expedições e Crimson Rifts também são compartilhadas. Reúna os jogadores vivos a até 180 unidades de quem abre a entrada ou saída. O grupo atravessa junto e mantém os personagens, inventários e recursos individuais. Baús e guardiões pertencem à instância da sala, com um único registro de resgate. Quem entrar na sala depois aparece na entrada da instância ativa.
+
+Expedições e Rifts exigem nível 20 de todos os jogadores conectados. A rota da Expedição pode ser retomada pela mesa, preservando ferimentos e progresso. A Rift usa um único relógio de dez minutos; o tempo não acelera com o tamanho do grupo. Ao expirar, o servidor salva o retorno à superfície antes de mover os jogadores.
+
+As telas e o combate usam o código original. Mapas e viagens pela superfície, suporte touch e controles de console ainda precisam de fluxos cooperativos completos e continuam disponíveis no modo solo.
 
 As salas são privadas por convite, sem cadastro. O servidor aceita no máximo 32 salas por processo. Esta implementação usa um processo com saves em disco; múltiplas réplicas independentes não compartilham salas. A página `/api/health` retorna o estado do processo e responde com 503 se o último salvamento falhar.
 

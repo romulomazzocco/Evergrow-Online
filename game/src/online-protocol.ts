@@ -4,6 +4,8 @@ import type { GroundGold } from './gold.ts';
 import type { ActiveGroundEffect } from './ground-effects.ts';
 import type { ChainFlight } from './chain-lightning.ts';
 import type { EventState, EventSite, EventChoice } from './poi-content.ts';
+import type { Expeditions } from './dungeon-state.ts';
+import type { DungeonEntrance } from './dungeon.ts';
 
 export const ONLINE_VERSION = 1;
 export const ONLINE_LIMITS = { players: 4, rooms: 32, inputAge: 600, reconnect: 120_000, body: 8192 } as const;
@@ -16,6 +18,8 @@ export interface OnlineSnapshot {
   pickups: Pickup[]; groundItems: GroundItem[]; groundGold: GroundGold[]; brokenContainers: string[];
   events: { player: string | null; event: CombatEvent }[];
   eventState: EventState;
+  location: DungeonEntrance | null;
+  expeditions: Expeditions;
 }
 export function encodeOnline(value: unknown): string {
   return JSON.stringify(value, (_key, v: unknown) => v instanceof Set ? { $set: [...v] } : v);

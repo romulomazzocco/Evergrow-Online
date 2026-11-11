@@ -26,6 +26,14 @@ import { refreshCharacter } from './character.ts';
 import type { CharacterSheet } from './character-types.ts';
 import { EventPanel } from './poi-panel.ts';
 import { eventInteractionSites, focusEvent } from './poi-content.ts';
+import { generateDungeon } from './dungeon.ts';
+import { currentDungeon } from './dungeon-state.ts';
+import { DungeonWorld } from './dungeon-world.ts';
+import { RiftWorld } from './rift-world.ts';
+import { dungeonRunExit } from './dungeon-locations.ts';
+import { RiftPanel } from './rift-panel.ts';
+import { ExpeditionPanel } from './expedition-panel.ts';
+import { drawRiftHUD } from './rift-hud.ts';
 
 installUITheme();
 const app=document.querySelector<HTMLElement>('#app')!;
@@ -83,6 +91,7 @@ async function startGame(ticket:RoomTicket):Promise<void> {
 
 class OnlineGame {
   private world:World;
+  private surface:World;
   private sim:Simulation;
   private renderer=new Renderer(true);
   private input=new GameInput(controls);
@@ -101,19 +110,21 @@ class OnlineGame {
   private connected=false;
   private sending=false;
   private sequence=Date.now();
-  private panel:'inventory'|'skills'|'service'|'event'|null=null;
+  private panel:'inventory'|'skills'|'service'|'event'|'rift'|'expedition'|null=null;
   private inventory:InventoryPanel;
   private skills:SkillTreePanel;
   private service:ServicePanel;
   private events:EventPanel;
+  private rifts:RiftPanel;
+  private expeditions:ExpeditionPanel;
   private companions:Player[]=[];
   private lastParty='';
   private reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   constructor(ticket:RoomTicket){
-    this.world=new World(ticket.seed);this.sim=new Simulation(this.world,{seed:ticket.seed,spawn:false});
+    this.surface=new World(ticket.seed);this.world=this.surface;this.sim=new Simulation(this.world,{seed:ticket.seed,spawn:false});
     app.innerHTML=`<div class="online-game"><canvas id="online-world" tabindex="0" aria-label="Evergrow Online"></canvas><canvas id="online-ui" aria-hidden="true"></canvas>
-      <nav class="online-bar" aria-label="Sala"><span id="online-connection" role="status">Conectando…</span><button id="online-copy">Copiar convite</button><button id="online-inventory">Inventário</button><button id="online-skills">Habilidades</button><button id="online-leave">Sair</button></nav>
+      <nav class="online-bar" aria-label="Sala"><span id="online-connection" role="status">Conectando…</span><button id="online-copy">Copiar convite</button><button id="online-inventory">Inventário</button><button id="online-skills">Habilidades</button><button id="online-exit" hidden>Sair da masmorra</button><button id="online-leave">Sair</button></nav>
       <ul id="online-party" class="online-party" aria-label="Jogadores na sala"></ul>
       <p id="online-toast" class="online-toast" role="status" hidden></p>
       <section id="online-death" class="online-death" hidden><h2>Você caiu</h2><p>Seus companheiros continuam na floresta.</p><button id="online-revive" class="online-primary">Voltar ao acampamento</button></section>
@@ -138,7 +149,14 @@ class OnlineGame {
           return {ok:result.ok===true,message:String(result.message??'')};
         }catch(error){return {ok:false,message:(error as Error).message};}
       }});
-    this.events=new EventPanel(mount,{close:()=>this.closePanel(),choose:(site,choice)=>{this.closePanel();this.command({type:'event',id:site.id,choice});}});
+    this.events=new EventPanel(mount,{close:()=>this.closePanel(),choose:(site,choice)=>{this.closePanel();this.command({type:'event',id:site.id,choice});},
+      enter:entrance=>{this.closePanel();this.command({type:'dungeon',kind:'enter',id:entrance.id});}});
+    const travel=async(action:import('./dungeon-command.ts').DungeonAction)=>{
+      try{await this.client.post('command',{type:'dungeon',...action});this.closePanel();return true;}
+      catch(error){this.toast((error as Error).message);return false;}
+    };
+    this.rifts=new RiftPanel(mount,{close:()=>this.closePanel(),enter:travel});
+    this.expeditions=new ExpeditionPanel(mount,{close:()=>this.closePanel(),enter:travel});
     this.client=new OnlineClient(ticket,snapshot=>this.snapshot(snapshot),(status,connected)=>{
       this.connected=connected;const label=app.querySelector<HTMLElement>('#online-connection');if(label){label.textContent=status;label.dataset.connected=String(connected);}
       if(!connected)this.input.clear();
@@ -157,6 +175,7 @@ class OnlineGame {
     },{signal});
     app.querySelector('#online-inventory')!.addEventListener('click',()=>this.openPanel('inventory'),{signal});
     app.querySelector('#online-skills')!.addEventListener('click',()=>this.openPanel('skills'),{signal});
+    app.querySelector('#online-exit')!.addEventListener('click',()=>this.command({type:'dungeon',kind:'exit'}),{signal});
     app.querySelector('#online-revive')!.addEventListener('click',()=>this.command({type:'revive'}),{signal});
     this.canvas.addEventListener('contextmenu',event=>event.preventDefault(),{signal});
     this.canvas.addEventListener('pointermove',event=>this.input.movePointer(event.clientX,event.clientY,this.canvas.getBoundingClientRect(),this.renderer.width,this.renderer.height),{signal});
@@ -195,9 +214,31 @@ class OnlineGame {
     if(!this.connected){this.toast('Aguarde a conexão com a sala.');return;}
     void this.client.post('command',value).catch(error=>this.toast((error as Error).message));
   }
-  private closePanel():void {this.inventory.close();this.skills.close();this.service.close();this.events.close();this.panel=null;this.input.clear();this.canvas.focus();}
+  private closePanel():void {this.inventory.close();this.skills.close();this.service.close();this.events.close();this.rifts.close();this.expeditions.close();this.panel=null;this.input.clear();this.canvas.focus();}
   private openEvent(pointer?:{x:number;y:number}):boolean {
-    const p=this.sim.player,sites=eventInteractionSites(this.world.getEventSites(p.x-1200,p.y-1200,2400,2400),this.sim.eventState,this.world);
+    if(this.sim.dungeonFloor){
+      const floor=this.sim.dungeonFloor,p=this.sim.player,run=currentDungeon(this.sim.expeditions)!;
+      const event=floor.events?.find(event=>Math.hypot(event.x-p.x,event.y-p.y)<=75&&!run.events?.[event.id]?.started);
+      if(event){this.command({type:'dungeonEvent',id:event.id});return true;}
+      if([floor.entry,dungeonRunExit(floor,run)].some(point=>Math.hypot(point.x-p.x,point.y-p.y)<=75)){
+        this.command({type:'dungeon',kind:'exit'});return true;
+      }
+      return false;
+    }
+    const p=this.sim.player,building=this.world.getBuildings(p.x-180,p.y-180,360,360)
+      .filter(b=>(b.kind==='rift'||b.kind==='expedition')&&Math.hypot(p.x-b.door.x,p.y-b.door.y)<=90
+        &&(!pointer||Math.hypot(pointer.x-(b.x+b.width/2),pointer.y-(b.y+b.height/2))<Math.max(b.width,b.height)))
+      .sort((a,b)=>Math.hypot(p.x-a.door.x,p.y-a.door.y)-Math.hypot(p.x-b.door.x,p.y-b.door.y))[0];
+    if(building){
+      this.closePanel();
+      if(building.kind==='rift'){this.panel='rift';this.rifts.open(this.sim.expeditions,p,building.id);}
+      else{this.panel='expedition';this.expeditions.open(this.sim.expeditions,p.level,this.surface.seed,building.id);}return true;
+    }
+    const entrance=this.world.getDungeonEntrances(this.sim.player.x-160,this.sim.player.y-160,320,320)
+      .find(entrance=>Math.hypot(entrance.x-this.sim.player.x,entrance.y-this.sim.player.y)<=75
+        &&(!pointer||Math.hypot(pointer.x-entrance.x,pointer.y-entrance.y)<60));
+    if(entrance){this.closePanel();this.panel='event';this.events.openDungeon(entrance);return true;}
+    const sites=eventInteractionSites(this.world.getEventSites(p.x-1200,p.y-1200,2400,2400),this.sim.eventState,this.world);
     const site=focusEvent(sites,p,this.world,pointer);if(!site)return false;
     this.closePanel();this.panel='event';this.events.open(site);return true;
   }
@@ -226,6 +267,14 @@ class OnlineGame {
     if(this.lastSnapshot&&snapshot.tick<=this.lastSnapshot.tick)return;
     const own=snapshot.players.find(member=>member.id===snapshot.self);if(!own)return;
     const old=this.lastSnapshot;
+    if((old?.location?.id??null)!==(snapshot.location?.id??null)){
+      this.closePanel();const previous=this.world;
+      if(snapshot.location){const floor=generateDungeon(snapshot.location.seed,snapshot.location.level,snapshot.location);
+        this.world=snapshot.location.rift?new RiftWorld(floor,snapshot.location):new DungeonWorld(floor,snapshot.location);this.sim.dungeonFloor=floor;
+      }else{this.world=this.surface;this.sim.dungeonFloor=null;}
+      this.sim.world=this.world;this.renderer.reset();if(previous!==this.surface)previous.dispose();
+    }
+    this.sim.expeditions=snapshot.expeditions;
     // Retain the previous delivered positions, rather than a 120 Hz position that
     // is only a fraction of a network frame away from the current position.
     const position=(next:{x:number;y:number;prevX:number;prevY:number},before?:{x:number;y:number})=>{
@@ -235,6 +284,7 @@ class OnlineGame {
     for(const member of snapshot.players)position(member.player,old?.players.find(p=>p.id===member.id)?.player);
     for(const enemy of snapshot.enemies)position(enemy,old?.enemies.find(e=>e.id===enemy.id));
     for(const shot of snapshot.projectiles)position(shot,old?.projectiles.find(p=>p.id===shot.id));
+    for(const key of Object.keys(this.sim.player))if(!Object.hasOwn(own.player,key))Reflect.deleteProperty(this.sim.player,key);
     Object.assign(this.sim.player,own.player);this.sim.time=snapshot.time;this.sim.enemies=snapshot.enemies;this.sim.projectiles=snapshot.projectiles;
     this.sim.groundEffects=snapshot.groundEffects;this.sim.chains=snapshot.chains;this.sim.pickups=snapshot.pickups;
     this.sim.groundItems=snapshot.groundItems;this.sim.groundGold=snapshot.groundGold;
@@ -244,7 +294,7 @@ class OnlineGame {
     this.sim.brokenContainers.clear();for(const id of snapshot.brokenContainers)this.sim.brokenContainers.add(id);
     this.world.setBrokenContainers(this.sim.brokenContainers);
     this.companions=snapshot.players.filter(member=>member.id!==snapshot.self&&member.connected).map(member=>member.player);
-    if(!old)this.renderer.snapTo(this.sim.player);
+    if(!old||old.location?.id!==snapshot.location?.id)this.renderer.snapTo(this.sim.player);
     const events=snapshot.events.filter(({player,event})=>!personalEvents.has(event.type)||player===snapshot.self).map(record=>record.event);
     this.renderer.handleEvents(events,this.reducedMotion);for(const event of events)this.audio.play(event);
     for(const event of events)if(event.type==='notice')this.toast(event.message);
@@ -254,6 +304,8 @@ class OnlineGame {
       app.querySelector('#online-party')!.innerHTML=snapshot.players.map(member=>`<li class="${member.id===snapshot.self?'self':''}"><span>${escapeUI(member.player.name??'Viajante')}</span><small>Nv. ${member.player.level} · ${member.player.dead?'Caído':member.connected?'Na sala':'Reconectando'}</small></li>`).join('');
     }
     app.querySelector<HTMLElement>('#online-death')!.hidden=!this.sim.player.dead;
+    app.querySelector<HTMLElement>('#online-revive')!.textContent=snapshot.location?'Voltar à entrada':'Voltar ao acampamento';
+    app.querySelector<HTMLElement>('#online-exit')!.hidden=!snapshot.location;
     if(this.sim.player.dead&&this.panel)this.closePanel();
     if(this.panel==='inventory')this.inventory.refresh(this.sim.player);if(this.panel==='skills')this.skills.refresh(this.sim.player);
     this.receivedAt=performance.now();this.lastSnapshot=snapshot;
@@ -271,6 +323,7 @@ class OnlineGame {
       this.renderer.pointerX=this.input.pointer.x;this.renderer.pointerY=this.input.pointer.y;this.renderer.pointerActive=this.input.pointer.present&&!this.panel;
       this.renderer.render(this.sim,this.world,dt,settings);this.fx.render(this.renderer.canvas,this.renderer.hurt,this.renderer.emission);
       this.ctx.clearRect(0,0,this.ui.width,this.ui.height);this.renderer.renderUI(this.ctx,this.sim,this.world,settings);
+      const run=currentDungeon(this.sim.expeditions);if(run?.rift)drawRiftHUD(this.ctx,run,this.renderer.width);
       for(const companion of this.companions){
         const x=companion.prevX+(companion.x-companion.prevX)*alpha,y=companion.prevY+(companion.y-companion.prevY)*alpha;
         const point=this.renderer.worldToScreen(x,y-70);text(this.ctx,companion.name??'Viajante',point.x,point.y,.8,'#b9dfcc','center');
@@ -280,7 +333,7 @@ class OnlineGame {
   }
   dispose():void {
     this.abort.abort();this.client.dispose();clearInterval(this.inputTimer);cancelAnimationFrame(this.frame);
-    this.inventory.dispose();this.skills.dispose();this.service.dispose();this.events.dispose();this.renderer.reset();this.fx.dispose();this.audio.dispose();this.world.dispose();
+    this.inventory.dispose();this.skills.dispose();this.service.dispose();this.events.dispose();this.rifts.dispose();this.expeditions.dispose();this.renderer.reset();this.fx.dispose();this.audio.dispose();this.world.dispose();if(this.world!==this.surface)this.surface.dispose();
   }
 }
 

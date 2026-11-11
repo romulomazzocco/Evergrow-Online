@@ -72,6 +72,7 @@ import { RoamingEncounters, ROAMING_RULES, ROAMING_GROUPS, roamingSpawnAnchor, s
 import { isSpawnHidden, type SpawnExclusion } from './spawn-visibility.ts';
 import { updateEnemyAI, type EnemyAIContext } from './enemy-ai.ts';
 import { PlayerMovement } from './player-movement.ts';
+import { advanceDungeonEvents } from './dungeon-events.ts';
 
 export const FIXED_STEP = COMBAT_TIMING.fixedStep;
 export const HIT_FLASH_DURATION = COMBAT_TIMING.hitFlashDuration;
@@ -380,6 +381,10 @@ export class Simulation {
   }
   updateCooperative(members: readonly { sim: Simulation; input: Input }[]): void {
     const dt = FIXED_STEP;
+    if(members.length)this.player=(members.find(member=>!member.sim.player.dead)??members[0]).sim.player;
+    tickRift(this,dt);
+    const riftBefore=currentDungeon(this.expeditions)?.rift?.phase;
+    if(riftBefore==='failed')return;
     this.capturePositions();
     this.time += dt;
     for (const enemy of this.enemies) enemy.hitFlash = Math.max(0, enemy.hitFlash - dt);
@@ -425,6 +430,8 @@ export class Simulation {
       commit(sim);
     }
     const party = members.map(member => member.sim);
+    const riftAfter=currentDungeon(this.expeditions)?.rift?.phase;
+    if(riftAfter!==riftBefore&&(riftAfter==='boss'||riftAfter==='complete'))for(const shot of this.projectiles)shot.life=0;
     this.updateEnemies(dt, party);
     this.updateProjectiles(dt, party);
     // The shared pickup clocks and attraction must not accelerate with party size.
@@ -442,7 +449,14 @@ export class Simulation {
     });
     for (const sim of party) if (!sim.player.dead) {
       share(sim); sim.camps = this.camps;
-      sim.updateSpawns(dt); commit(sim);
+      if(this.dungeonFloor)updateDungeon(sim,sim.spawnExclusion,0,event=>sim.emit(event));
+      else sim.updateSpawns(dt);
+      commit(sim);
+    }
+    if(this.dungeonFloor&&living.length){
+      const run=currentDungeon(this.expeditions),event=this.dungeonFloor.events?.find(event=>run?.events?.[event.id]?.started&&!run.events[event.id].finished);
+      const anchor=event?living.reduce((a,b)=>Math.hypot(a.player.x-event.x,a.player.y-event.y)<Math.hypot(b.player.x-event.x,b.player.y-event.y)?a:b):living[0];
+      const previous=this.player;this.player=anchor.player;advanceDungeonEvents(this,dt,event=>this.emit(event));this.player=previous;
     }
     syncTrial(this.eventState,this.enemies);
     this.eventTimer-=dt;
@@ -455,7 +469,7 @@ export class Simulation {
     }
     this.world.setBrokenContainers?.(this.brokenContainers);
     this.enemies = this.enemies.filter(e => e.state !== 'dead' || e.stateTime < ENCOUNTER_RULES.corpseDuration);
-    this.enemies = this.enemies.filter(enemy => !party.length || party.some(sim => !sim.spawnExclusion
+    if(!this.dungeonFloor)this.enemies = this.enemies.filter(enemy => !party.length || party.some(sim => !sim.spawnExclusion
       || !shouldRetireRoamer(enemy,sim.player,sim.spawnExclusion,sim.roaming.heading)));
     for (const sim of party) share(sim);
   }
