@@ -1,4 +1,5 @@
 .git
+.online-host
 **/node_modules
 **/dist
 **/online-data

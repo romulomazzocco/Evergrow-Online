@@ -35,6 +35,24 @@ O servidor salva as salas a cada dez segundos e no encerramento normal. Os dados
 
 ## Hospedar pela internet
 
+### Usar este PC com Serveo
+
+Com a versão de produção compilada e OpenSSH instalado, execute na raiz:
+
+```sh
+npm run online:remote
+npm run online:remote:status
+npm run online:remote:stop
+```
+
+O primeiro comando imprime o endereço HTTPS e deixa o host em segundo plano. O segundo consulta o endereço atual; o terceiro encerra o acesso externo. O PC precisa continuar ligado, conectado à internet e sem suspensão. Depois de reiniciar o PC, execute o primeiro comando novamente. O comando não cria inicialização automática no Windows.
+
+O host reutiliza o servidor de salas em `127.0.0.1:3001`. Se ele não estiver executando, inicia a versão de produção com os mesmos saves de `game/online-data`. Um proxy em `127.0.0.1:3002` comprime arquivos e atualizações em tempo real. O Serveo recebe somente esse proxy por SSH na porta 22, com HTTPS obrigatório e verificação da chave do relay. O servidor Vite não é exposto. A conexão SSH é refeita automaticamente quando cai; o endereço gratuito pode mudar, então consulte o status após uma reconexão.
+
+O tráfego da partida passa pelo Serveo, incluindo autenticação e estado dos personagens. Qualquer pessoa com o endereço pode abrir o jogo; cada sala continua exigindo seu convite. O plano gratuito pode apresentar um aviso do próprio Serveo antes de abrir a página. Os arquivos de controle, logs e chaves locais ficam em `.online-host/`, excluída do Git. A chave pública do relay foi conferida na [documentação do Serveo](https://serveo.net/docs/); uma alteração legítima dessa chave exige atualizar o host após verificá-la novamente.
+
+### Hospedagem direta ou com Docker
+
 Primeiro compile e execute:
 
 ```sh
